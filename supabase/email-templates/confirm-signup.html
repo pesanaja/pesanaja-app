@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>Konfirmasi email PesanAja</title>
+  </head>
+  <body style="margin:0;padding:0;background-color:#eef2fa;font-family:Arial,Helvetica,sans-serif;color:#19243d;">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">
+      Konfirmasi alamat email untuk mengaktifkan akun PesanAja kamu.
+    </div>
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#eef2fa;">
+      <tr>
+        <td align="center" style="padding:40px 16px;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:560px;background-color:#ffffff;border:1px solid #e3e9f5;border-radius:20px;overflow:hidden;box-shadow:0 12px 36px rgba(25,36,61,.10);">
+            <tr>
+              <td align="center" style="padding:32px 28px 18px;">
+                <div style="font-size:26px;line-height:1;font-weight:800;letter-spacing:-1.4px;color:#19243d;">
+                  pesan<span style="color:#4768af;">aja</span><span style="display:inline-block;margin-left:2px;color:#f49c70;font-size:18px;vertical-align:top;">✦</span>
+                </div>
+              </td>
+            </tr>
+            <tr>
+              <td align="center" style="padding:12px 36px 0;">
+                <div style="display:inline-block;padding:7px 12px;border-radius:999px;background-color:#edf2fb;color:#4768af;font-size:11px;line-height:1.2;font-weight:700;letter-spacing:1px;text-transform:uppercase;">Selamat datang</div>
+                <h1 style="margin:18px 0 10px;font-size:27px;line-height:1.25;letter-spacing:-.7px;color:#19243d;">Satu langkah lagi!</h1>
+                <p style="margin:0;color:#66728b;font-size:15px;line-height:1.7;">Terima kasih sudah bergabung dengan PesanAja. Konfirmasi alamat email ini untuk mengaktifkan akunmu dan mulai menjelajahi pre-order kampus.</p>
+              </td>
+            </tr>
+            <tr>
+              <td align="center" style="padding:28px 36px 20px;">
+                <a href="{{ .ConfirmationURL }}" style="display:inline-block;min-width:210px;padding:15px 24px;border-radius:999px;background-color:#19243d;color:#ffffff;text-align:center;text-decoration:none;font-size:14px;line-height:1.2;font-weight:700;">Konfirmasi email</a>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:0 36px 28px;">
+                <p style="margin:0;color:#7b8498;text-align:center;font-size:12px;line-height:1.7;">Kalau tombol tidak bisa dibuka, salin dan tempel tautan berikut ke browser:</p>
+                <p style="margin:8px 0 0;word-break:break-all;text-align:center;font-size:11px;line-height:1.6;"><a href="{{ .ConfirmationURL }}" style="color:#4768af;text-decoration:underline;">{{ .ConfirmationURL }}</a></p>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:18px 28px;background-color:#f7f9fd;border-top:1px solid #e9eef7;">
+                <p style="margin:0;color:#8992a5;text-align:center;font-size:11px;line-height:1.7;">Jika kamu tidak membuat akun PesanAja, abaikan email ini. Kami tidak akan mengaktifkan akun tanpa konfirmasi darimu.</p>
+                <p style="margin:10px 0 0;color:#a0a7b5;text-align:center;font-size:10px;line-height:1.5;">© PesanAja · Pre-order kampus, lebih gampang.</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

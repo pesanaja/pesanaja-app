@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 76 76" fill="none">
+  <defs>
+    <linearGradient id="bag" x1="9" y1="8" x2="65" y2="66" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4768AF"/>
+      <stop offset="1" stop-color="#092052"/>
+    </linearGradient>
+    <filter id="shadow" x="0" y="0" width="78" height="80" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="3"/>
+      <feOffset dy="3"/>
+      <feColorMatrix values="0 0 0 0 0.18 0 0 0 0 0.25 0 0 0 0 0.48 0 0 0 .2 0"/>
+      <feBlend in2="SourceGraphic" result="shadow"/>
+      <feComposite in="SourceGraphic" in2="shadow" operator="over"/>
+    </filter>
+  </defs>
+  <g filter="url(#shadow)">
+    <rect x="8" y="7" width="58" height="58" rx="18" fill="url(#bag)"/>
+    <path d="M23 29.5h28l-2.3 22.2a4 4 0 0 1-4 3.6H29.3a4 4 0 0 1-4-3.6L23 29.5Z" fill="#fff" fill-opacity=".96"/>
+    <path d="M30.5 31v-4.3a6.5 6.5 0 0 1 13 0V31" stroke="#fff" stroke-width="3.5" stroke-linecap="round"/>
+    <path d="M31.5 37.5h11M31.5 43h7" stroke="#092052" stroke-width="2.7" stroke-linecap="round"/>
+  </g>
+</svg>
