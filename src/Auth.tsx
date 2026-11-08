@@ -11,7 +11,9 @@ export default function Auth({ onSignedIn }: { onSignedIn: (userId: string) => v
   const [showPassword, setShowPassword] = useState(false)
   const [showConfirmPassword, setShowConfirmPassword] = useState(false)
   const [name, setName] = useState('')
+  const [ownerName, setOwnerName] = useState('')
   const [phone, setPhone] = useState('')
+  const [nim, setNim] = useState('')
   const [error, setError] = useState('')
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
@@ -19,7 +21,12 @@ export default function Auth({ onSignedIn }: { onSignedIn: (userId: string) => v
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault(); setError(''); setMessage('')
     if (!supabase) { setError('Koneksi Supabase belum tersedia. Periksa .env.local lalu restart aplikasi.'); return }
+    if (mode === 'signup' && role === 'seller' && email.trim().toLowerCase().split('@').pop() !== 'student.ub.ac.id') {
+      setError('Pendaftaran penjual hanya menggunakan email @student.ub.ac.id.')
+      return
+    }
     if (mode === 'signup' && password !== confirmPassword) { setError('Konfirmasi kata sandi belum sama.'); return }
+    if (mode === 'signup' && role === 'seller' && !nim.trim()) { setError('NIM wajib diisi untuk akun penjual.'); return }
     setBusy(true)
     try {
       if (mode === 'reset') {
@@ -29,7 +36,16 @@ export default function Auth({ onSignedIn }: { onSignedIn: (userId: string) => v
         return
       }
       if (mode === 'signup') {
-        const { data, error: signUpError } = await supabase.auth.signUp({ email, password, options: { data: { full_name: name, phone, role } } })
+        const { data, error: signUpError } = await supabase.auth.signUp({
+          email: email.trim().toLowerCase(),
+          password,
+          options: { data: {
+            full_name: role === 'buyer' ? name : ownerName.trim(),
+            phone,
+            role,
+            ...(role === 'seller' ? { nim: nim.trim(), store_name: name.trim() } : {}),
+          } },
+        })
         if (signUpError) throw signUpError
         if (data.session && data.user) onSignedIn(data.user.id)
         else setMessage('Pendaftaran berhasil. Cek email untuk konfirmasi, lalu masuk ke PesanAja.')
@@ -43,12 +59,17 @@ export default function Auth({ onSignedIn }: { onSignedIn: (userId: string) => v
   }
 
   const title = mode === 'signup' ? 'Daftar' : mode === 'reset' ? 'Atur Kata Sandi' : 'Masuk'
-  return <main className="auth-page"><form className="auth-card" onSubmit={submit}>
-    <header><h1>{title}</h1>{mode !== 'reset' && <p>{mode === 'signup' ? 'Telah memiliki akun?' : 'Belum memiliki akun?'} <button type="button" className="auth-inline" onClick={() => setMode(mode === 'signup' ? 'login' : 'signup')}>{mode === 'signup' ? 'Masuk' : 'Daftar'}</button></p>}</header>
+  return <main className="auth-page"><form className={`auth-card auth-card-${mode}`} onSubmit={submit}>
+    <header><h1>{title}</h1>{mode !== 'reset' && <p>{mode === 'signup' ? 'Telah memiliki akun?' : 'Belum memiliki akun?'} <button type="button" className="auth-inline" onClick={() => { setError(''); setMessage(''); setMode(mode === 'signup' ? 'login' : 'signup') }}>{mode === 'signup' ? 'Masuk' : 'Daftar'}</button></p>}</header>
     {mode === 'signup' && <div className="auth-role"><button type="button" className={role === 'buyer' ? 'chosen' : ''} onClick={() => setRole('buyer')}>Pembeli</button><button type="button" className={role === 'seller' ? 'chosen' : ''} onClick={() => setRole('seller')}>Penjual</button></div>}
-    {mode === 'signup' && <input autoComplete="name" placeholder="Nama Lengkap" value={name} onChange={e => setName(e.target.value)} required />}
+    {mode === 'signup' && role === 'buyer' && <input autoComplete="name" placeholder="Nama Lengkap" value={name} onChange={e => setName(e.target.value)} required />}
+    <input autoComplete="email" type="email" placeholder={mode === 'signup' && role === 'seller' ? 'Email UB (@student.ub.ac.id)' : 'Email'} aria-label="Email" value={email} onChange={e => setEmail(e.target.value)} required />
+    {mode === 'signup' && role === 'seller' && <input autoComplete="name" placeholder="Nama Penanggung Jawab / Pemilik Usaha" value={ownerName} onChange={e => setOwnerName(e.target.value)} required />}
     {mode === 'signup' && <input autoComplete="tel" type="tel" placeholder="Nomor Telepon" value={phone} onChange={e => setPhone(e.target.value)} required />}
-    <input autoComplete="email" type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} required />
+    {mode === 'signup' && role === 'seller' && <>
+      <input autoComplete="off" placeholder="NIM Anda/perwakilan" value={nim} onChange={e => setNim(e.target.value)} required />
+      <input autoComplete="organization" placeholder="Nama Toko" value={name} onChange={e => setName(e.target.value)} required />
+    </>}
     {mode !== 'reset' && <div className="auth-password-field"><input autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} type={showPassword ? 'text' : 'password'} placeholder="Kata Sandi" value={password} onChange={e => setPassword(e.target.value)} minLength={8} required /><button type="button" className="auth-password-toggle" aria-label={showPassword ? 'Sembunyikan kata sandi' : 'Tampilkan kata sandi'} aria-pressed={showPassword} onClick={() => setShowPassword(value => !value)}>{showPassword ? <EyeOff size={18} /> : <Eye size={18} />}</button></div>}
     {mode === 'signup' && <div className="auth-password-field"><input autoComplete="new-password" type={showConfirmPassword ? 'text' : 'password'} placeholder="Konfirmasi Kata Sandi" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)} minLength={8} required /><button type="button" className="auth-password-toggle" aria-label={showConfirmPassword ? 'Sembunyikan konfirmasi kata sandi' : 'Tampilkan konfirmasi kata sandi'} aria-pressed={showConfirmPassword} onClick={() => setShowConfirmPassword(value => !value)}>{showConfirmPassword ? <EyeOff size={18} /> : <Eye size={18} />}</button></div>}
     {mode === 'login' && <button className="auth-forgot" type="button" onClick={() => setMode('reset')}>Lupa Kata Sandi?</button>}

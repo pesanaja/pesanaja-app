@@ -6,9 +6,9 @@ const categories = ['Makanan Berat & Bento', 'Kue dan Roti', 'Lainnya']
 
 type FormValues = { storeName: string; ownerName: string; location: string; whatsapp: string; payment: string }
 
-export default function Onboarding({ onComplete }: { onComplete: (storeName: string) => void }) {
+export default function Onboarding({ onComplete, initialStoreName = '', initialOwnerName = '', initialPhone = '' }: { onComplete: (storeName: string) => void; initialStoreName?: string; initialOwnerName?: string; initialPhone?: string }) {
   const [step, setStep] = useState<1 | 2>(1)
-  const [values, setValues] = useState<FormValues>({ storeName: '', ownerName: '', location: '', whatsapp: '', payment: '' })
+  const [values, setValues] = useState<FormValues>(() => ({ storeName: initialStoreName, ownerName: initialOwnerName, location: '', whatsapp: initialPhone, payment: '' }))
   const [category, setCategory] = useState<string[]>([])
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
