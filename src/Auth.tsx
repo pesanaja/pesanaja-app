@@ -39,12 +39,15 @@ export default function Auth({ onSignedIn }: { onSignedIn: (userId: string) => v
         const { data, error: signUpError } = await supabase.auth.signUp({
           email: email.trim().toLowerCase(),
           password,
-          options: { data: {
-            full_name: role === 'buyer' ? name : ownerName.trim(),
-            phone,
-            role,
-            ...(role === 'seller' ? { nim: nim.trim(), store_name: name.trim() } : {}),
-          } },
+          options: {
+            emailRedirectTo: location.origin,
+            data: {
+              full_name: role === 'buyer' ? name : ownerName.trim(),
+              phone,
+              role,
+              ...(role === 'seller' ? { nim: nim.trim(), store_name: name.trim() } : {}),
+            },
+          },
         })
         if (signUpError) throw signUpError
         if (data.session && data.user) onSignedIn(data.user.id)

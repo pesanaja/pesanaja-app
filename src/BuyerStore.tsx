@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  ArrowLeft, ArrowRight, Check, Clock3, ImagePlus, LogOut,
-  Minus, Plus, Search, ShoppingCart, Store, Trash2, UserRound,
+  ArrowLeft, ArrowRight, BookOpen, Check, Clock3, ImagePlus, LogOut,
+  Minus, Plus, RefreshCw, Search, ShoppingCart, Store, Trash2, UserRound,
 } from 'lucide-react'
 import { supabase } from './lib/supabase'
 
@@ -23,7 +23,7 @@ type Product = {
   pickupLocation: string | null
 }
 type CartLine = { product: Product; quantity: number; variant: string | null }
-type Page = 'home' | 'detail' | 'store' | 'cart' | 'checkout' | 'done'
+type Page = 'home' | 'detail' | 'education' | 'education-detail' | 'store' | 'cart' | 'checkout' | 'done'
 type PaymentMethod = 'qris' | 'transfer' | 'cash'
 type CreatedOrder = { orderId: string; paymentId: string; orderNumber: string; total: number }
 type CatalogRow = {
@@ -36,6 +36,11 @@ type CatalogRow = {
 type StoreRow = { user_id: string; store_name: string; description: string | null; payment_details: string | null; pickup_location: string | null }
 
 const money = (value: number) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(value)
+const buyerGuide = {
+  title: 'Be a Smart Buyer!',
+  intro: 'Belanja produk dari sesama mahasiswa memang menyenangkan. Mulai dari makanan homemade, minuman, merchandise, sampai berbagai produk hasil kreativitas mahasiswa lainnya. Namun, menjadi pembeli yang baik bukan hanya tentang menemukan produk yang menarik dan mendapatkan harga terbaik. Ada beberapa hal yang perlu diperhatikan agar transaksi berjalan lancar dan menguntungkan kedua belah pihak.',
+  image: '/assets/education/buyer-guide-detail.png',
+}
 
 export default function BuyerStore({ userId, onSignOut }: { userId: string | null; onSignOut: () => void | Promise<void> }) {
   const [page, setPage] = useState<Page>('home')
@@ -55,74 +60,87 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
 
+  useEffect(() => {
+    window.scrollTo(0, 0)
+  }, [page])
+
   async function signOut() {
     try { await onSignOut() }
     catch (cause) { setError(cause instanceof Error ? cause.message : 'Gagal keluar. Coba lagi.') }
   }
 
-  useEffect(() => {
-    let active = true
-    async function loadStore() {
-      if (!supabase) {
-        setError('Koneksi Supabase belum tersedia.')
-        setLoading(false)
-        return
-      }
-      setLoading(true)
-      setError('')
-      const { data, error: catalogError } = await supabase
-        .from('batch_products')
-        .select('batch_id,price,stock_limit,product:products!inner(id,store_id,name,description,category,variants,image_url),batch:preorder_batches!inner(id,name,store_id,closes_at)')
-        .eq('batch.status', 'open')
-        .eq('product.is_active', true)
-      if (catalogError) {
-        if (active) { setError(`Produk gagal dimuat: ${catalogError.message}`); setLoading(false) }
-        return
-      }
-      const rows = (data ?? []) as unknown as CatalogRow[]
-      const storeIds = [...new Set(rows.flatMap(row => row.product?.store_id ? [row.product.store_id] : []))]
-      const storesResult = storeIds.length
-        ? await supabase.from('seller_profiles').select('user_id,store_name,description,payment_details,pickup_location').in('user_id', storeIds)
-        : { data: [], error: null }
-      if (storesResult.error) {
-        if (active) { setError(`Informasi toko gagal dimuat: ${storesResult.error.message}`); setLoading(false) }
-        return
-      }
-      const stores = new Map(((storesResult.data ?? []) as unknown as StoreRow[]).map(store => [store.user_id, store]))
-      const catalog = rows.flatMap(row => {
-        if (!row.product || !row.batch || row.stock_limit === 0 || !stores.has(row.product.store_id) || (row.batch.closes_at && new Date(row.batch.closes_at) <= new Date())) return []
-        const store = stores.get(row.product.store_id)
-        return [{
-          id: row.product.id,
-          batchId: row.batch_id,
-          batchName: row.batch.name,
-          storeId: row.product.store_id,
-          storeName: store?.store_name ?? 'Toko kampus',
-          name: row.product.name,
-          category: row.product.category ?? 'Produk',
-          variants: row.product.variants ?? [],
-          description: row.product.description ?? 'Produk pre-order pilihan dari toko kampus.',
-          imageUrl: row.product.image_url,
-          price: row.price,
-          stockLimit: row.stock_limit,
-          closesAt: row.batch.closes_at,
-          paymentDetails: store?.payment_details ?? null,
-          pickupLocation: store?.pickup_location ?? null,
-        }]
-      })
-      if (active) {
-        setProducts(catalog)
-        setLoading(false)
-        if (userId) {
-          const { data: profile, error: profileError } = await supabase.from('profiles').select('full_name').eq('id', userId).maybeSingle()
-          if (active && profileError) setError(`Profil pembeli gagal dimuat: ${profileError.message}`)
-          else if (active && profile?.full_name) setBuyerName(profile.full_name)
-        }
-      }
+  const loadStore = useCallback(async (showLoading = true) => {
+    if (!supabase) {
+      setError('Koneksi Supabase belum tersedia.')
+      setLoading(false)
+      return
     }
-    void loadStore()
-    return () => { active = false }
+    if (showLoading) setLoading(true)
+    setError('')
+    const { data, error: catalogError } = await supabase
+      .from('batch_products')
+      .select('batch_id,price,stock_limit,product:products!inner(id,store_id,name,description,category,variants,image_url),batch:preorder_batches!inner(id,name,store_id,status,closes_at)')
+      .eq('batch.status', 'open')
+      .eq('product.is_active', true)
+    if (catalogError) {
+      setError(`Produk gagal dimuat: ${catalogError.message}`)
+      setLoading(false)
+      return
+    }
+    const rows = (data ?? []) as unknown as CatalogRow[]
+    const storeIds = [...new Set(rows.flatMap(row => row.product?.store_id ? [row.product.store_id] : []))]
+    const storesResult = storeIds.length
+      ? await supabase.from('seller_profiles').select('user_id,store_name,description,payment_details,pickup_location').in('user_id', storeIds)
+      : { data: [], error: null }
+    if (storesResult.error) {
+      setError(`Informasi toko gagal dimuat: ${storesResult.error.message}`)
+      setLoading(false)
+      return
+    }
+    const stores = new Map(((storesResult.data ?? []) as unknown as StoreRow[]).map(store => [store.user_id, store]))
+    const catalog = rows.flatMap(row => {
+      if (!row.product || !row.batch || row.stock_limit === 0 || !stores.has(row.product.store_id) || (row.batch.closes_at && new Date(row.batch.closes_at) <= new Date())) return []
+      const store = stores.get(row.product.store_id)
+      return [{
+        id: row.product.id,
+        batchId: row.batch_id,
+        batchName: row.batch.name,
+        storeId: row.product.store_id,
+        storeName: store?.store_name ?? 'Toko kampus',
+        name: row.product.name,
+        category: row.product.category ?? 'Produk',
+        variants: row.product.variants ?? [],
+        description: row.product.description ?? 'Produk pre-order pilihan dari toko kampus.',
+        imageUrl: row.product.image_url,
+        price: row.price,
+        stockLimit: row.stock_limit,
+        closesAt: row.batch.closes_at,
+        paymentDetails: store?.payment_details ?? null,
+        pickupLocation: store?.pickup_location ?? null,
+      }]
+    })
+    setProducts(catalog)
+    setLoading(false)
+    if (userId) {
+      const { data: profile, error: profileError } = await supabase.from('profiles').select('full_name').eq('id', userId).maybeSingle()
+      if (profileError) setError(`Profil pembeli gagal dimuat: ${profileError.message}`)
+      else if (profile?.full_name) setBuyerName(profile.full_name)
+    }
   }, [userId])
+
+  useEffect(() => { void loadStore() }, [loadStore])
+
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void loadStore(false)
+    }
+    window.addEventListener('focus', refreshWhenVisible)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      window.removeEventListener('focus', refreshWhenVisible)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
+  }, [loadStore])
 
   const visibleProducts = useMemo(() => products.filter(product =>
     `${product.name} ${product.storeName} ${product.category}`.toLowerCase().includes(search.toLowerCase()),
@@ -242,7 +260,7 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
       <button className="storefront-logo" onClick={() => setPage('home')} aria-label="Kembali ke beranda">
         <img src="/assets/pesanaja-logo.svg" alt="PesanAja" />
       </button>
-      <nav><button onClick={() => setPage('home')}>Edukasi</button><button className="selected" onClick={() => setPage('home')}>Belanja</button></nav>
+      <nav><button className={page.startsWith('education') ? 'selected' : ''} onClick={() => setPage('education')}>Edukasi</button><button className={page === 'home' || page === 'detail' || page === 'store' ? 'selected' : ''} onClick={() => setPage('home')}>Belanja</button></nav>
       <div className="storefront-actions">
         <button className="storefront-cart-link" aria-label={`Keranjang, ${cartCount} produk`} onClick={() => setPage('cart')}><ShoppingCart size={21}/>{cartCount > 0 && <span>{cartCount}</span>}</button>
         <span className="storefront-buyer-name">{buyerName || 'Pembeli'}</span>
@@ -250,9 +268,28 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
       </div>
     </header>
 
+    {page === 'education' && <section className="storefront-page buyer-education-page">
+      <div className="buyer-education-heading"><div><span className="buyer-education-eyebrow">PANDUAN PEMBELI</span><h1>Edukasi</h1><p>Tips sederhana untuk belanja pre-order dengan nyaman dan aman.</p></div><BookOpen size={30} aria-hidden="true"/></div>
+      <div className="buyer-education-grid">
+        {[0, 1, 2, 3, 4, 5].map(index => <article className="buyer-education-card" key={index}>
+          <img src="/assets/education/buyer-guide.png" alt="Pembeli sedang memeriksa informasi produk sebelum berbelanja" />
+          <div className="buyer-education-card-body"><span className="buyer-education-tag"><UserRound size={14}/> Pembeli</span><h2>{buyerGuide.title}</h2><p>{buyerGuide.intro}</p><button className="store-pill-button" onClick={() => setPage('education-detail')}>Baca <ArrowRight size={16}/></button></div>
+        </article>)}
+      </div>
+      <footer className="storefront-footer"><img src="/assets/pesanaja-logo-concept.svg" alt="PesanAja"/><small>© 2026 PesanAja Indonesia</small></footer>
+    </section>}
+
+    {page === 'education-detail' && <article className="storefront-page buyer-education-detail">
+      <button className="storefront-back" onClick={() => setPage('education')}><ArrowLeft size={18}/> Kembali ke edukasi</button>
+      <div className="buyer-article-hero"><img src={buyerGuide.image} alt="Ilustrasi pembeli meninjau produk secara cermat"/><div><span className="buyer-education-tag"><UserRound size={14}/> Pembeli</span><h1>{buyerGuide.title}</h1><p>{buyerGuide.intro}</p><p>Yuk, jadi pembeli yang lebih bijak!</p></div></div>
+      <section className="buyer-article-section"><h2>01. Read Before You Buy</h2><p>Jangan terburu-buru melakukan pemesanan hanya karena produknya terlihat menarik. Sebelum membeli, pastikan kamu sudah membaca:</p><ul><li>Deskripsi dan spesifikasi produk.</li><li>Harga dan biaya tambahan jika ada.</li><li>Varian atau pilihan produk.</li><li>Jadwal pemesanan dan pengiriman.</li><li>Ketentuan pembatalan pesanan.</li></ul><p>Dengan membaca informasi produk terlebih dahulu, kamu bisa menghindari kesalahpahaman setelah melakukan transaksi.</p></section>
+      <footer className="storefront-footer"><img src="/assets/pesanaja-logo-concept.svg" alt="PesanAja"/><small>© 2026 PesanAja Indonesia</small></footer>
+    </article>}
+
     {page === 'home' && <section className="storefront-home">
       <div className="storefront-welcome"><p>Pre-Order kampus lebih mudah bersama PesanAja</p><h1>Selamat Pagi!</h1><h2>Lagi pengen jajan apa?</h2>
         <label className="storefront-search"><Search size={18}/><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Cari produk atau toko"/><span>Cari</span></label>
+        <button className="storefront-refresh" onClick={() => void loadStore()} disabled={loading} aria-label="Muat ulang produk"><RefreshCw size={16}/> Muat ulang</button>
       </div>
       {error && <p className="storefront-error" role="alert">{error}</p>}
       {loading ? <div className="storefront-empty">Memuat produk…</div> : visibleProducts.length ? <div className="storefront-grid">
