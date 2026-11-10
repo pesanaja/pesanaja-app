@@ -126,7 +126,7 @@ body:has(.buyer-home),#root:has(.buyer-home),.buyer-home{background:transparent}
 .buyer-article-hero>img{display:block;width:100%;height:auto;max-height:390px;object-fit:cover;border-radius:20px}
 .buyer-article-hero h1{margin:14px 0 12px;color:#092052;font-size:clamp(28px,3.4vw,40px);line-height:1.15}
 .buyer-article-hero p{margin:0 0 12px;color:#4f5c73;font-size:15px;line-height:1.75}
-.buyer-article-section{max-width:850px;margin:0 auto;padding:24px 0 10px;color:#27364f}
+.buyer-article-section{width:100%;max-width:none;margin:0;padding:24px 0 10px;color:#27364f}
 .buyer-article-section h2{margin:0 0 12px;color:#092052;font-size:21px}
 .buyer-article-section p,.buyer-article-section li{font-size:14px;line-height:1.75}
 .buyer-article-section p{margin:8px 0}
