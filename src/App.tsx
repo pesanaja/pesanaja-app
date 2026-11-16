@@ -83,7 +83,7 @@ function App() {
   }}/>
   if (!onboarded) return <Onboarding initialStoreName={registeredStoreName} initialOwnerName={registeredOwnerName} initialPhone={registeredPhone} onComplete={name => { setStoreName(name); setOnboarded(true) }}/>
   if (!userId) return <div className="auth-loading">Sesi penjual tidak tersedia.</div>
-  return <SellerWorkspace userId={userId} storeName={storeName} onSignOut={() => { void supabase?.auth.signOut().then(({ error }) => {
+  return <SellerWorkspace userId={userId} storeName={storeName} onStoreNameChange={setStoreName} onSignOut={() => { void supabase?.auth.signOut().then(({ error }) => {
     if (error) { console.error('Gagal keluar:', error.message); return }
     setUserId(null)
   }) }}/>
