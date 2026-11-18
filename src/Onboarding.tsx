@@ -1,10 +1,14 @@
 import { useState } from 'react'
 import { BadgeCheck, Building2, Check, CreditCard, MapPin, MessageSquareText } from 'lucide-react'
 import { supabase } from './lib/supabase'
+import { isValidPersonName, normalizePersonName } from './lib/nameValidation'
 
 const categories = ['Makanan Berat & Bento', 'Kue dan Roti', 'Lainnya']
 
 type FormValues = { storeName: string; ownerName: string; location: string; whatsapp: string; payment: string }
+
+const invalidBusinessNameCharacters = /[^\p{L}\p{M}\p{N}\s]/u
+const sanitizeBusinessName = (value: string) => value.replace(/[^\p{L}\p{M}\p{N}\s]/gu, '')
 
 export default function Onboarding({ onComplete, initialStoreName = '', initialOwnerName = '', initialPhone = '' }: { onComplete: (storeName: string) => void; initialStoreName?: string; initialOwnerName?: string; initialPhone?: string }) {
   const [step, setStep] = useState<1 | 2>(1)
@@ -16,6 +20,23 @@ export default function Onboarding({ onComplete, initialStoreName = '', initialO
 
   async function saveProfile(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    const profileValues = {
+      ...values,
+      storeName: values.storeName.trim().replace(/\s+/g, ' '),
+      ownerName: normalizePersonName(values.ownerName),
+      location: values.location.trim(),
+      whatsapp: values.whatsapp.trim(),
+      payment: values.payment.trim(),
+    }
+    if (!profileValues.storeName) { setError('Nama usaha wajib diisi.'); return }
+    if (invalidBusinessNameCharacters.test(profileValues.storeName)) {
+      setError('Nama usaha hanya boleh berisi huruf, angka, dan spasi.')
+      return
+    }
+    if (!isValidPersonName(profileValues.ownerName)) {
+      setError('Nama pemilik harus berisi huruf dan hanya boleh memakai spasi, tanda hubung, atau apostrof.')
+      return
+    }
     if (!category.length) { setError('Pilih minimal satu kategori produk.'); return }
     setError('')
     setSaving(true)
@@ -24,14 +45,22 @@ export default function Onboarding({ onComplete, initialStoreName = '', initialO
         const { data: { user }, error: authError } = await supabase.auth.getUser()
         if (authError) throw authError
         if (user) {
-          const slug = `${values.storeName.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-')}-${user.id.slice(0, 6)}`
-          const { error: profileError } = await supabase.from('profiles').upsert({ id: user.id, full_name: values.ownerName, phone: values.whatsapp }, { onConflict: 'id' })
+          const slug = `${profileValues.storeName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}-${user.id.slice(0, 6)}`
+          const { error: profileError } = await supabase.from('profiles').upsert({ id: user.id, full_name: profileValues.ownerName, phone: profileValues.whatsapp }, { onConflict: 'id' })
           if (profileError) throw profileError
-          const { error: storeError } = await supabase.from('seller_profiles').upsert({ user_id: user.id, store_name: values.storeName, slug, product_categories: category, pickup_location: values.location, payment_details: values.payment || null }, { onConflict: 'user_id' })
+          const { error: storeError } = await supabase.from('seller_profiles').upsert({ user_id: user.id, store_name: profileValues.storeName, slug, product_categories: category, pickup_location: profileValues.location, payment_details: profileValues.payment || null }, { onConflict: 'user_id' })
           if (storeError) throw storeError
+          const { error: metadataError } = await supabase.auth.updateUser({
+            data: {
+              full_name: profileValues.ownerName,
+              phone: profileValues.whatsapp,
+              store_name: profileValues.storeName,
+            },
+          })
+          if (metadataError) throw new Error(`Profil usaha tersimpan, tetapi data akun gagal diperbarui: ${metadataError.message}`)
         }
       }
-      localStorage.setItem('pesanaja-seller-profile', JSON.stringify({ ...values, category, completedAt: new Date().toISOString() }))
+      setValues(profileValues)
       setStep(2)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Profil belum berhasil disimpan. Coba lagi.')
@@ -43,7 +72,7 @@ export default function Onboarding({ onComplete, initialStoreName = '', initialO
     <header className="onboarding-intro"><h1>Selamat Datang! Silahkan Lengkapi Profil Anda</h1><p>Yuk, lengkapi profil usaha Anda sebelum mulai</p></header>
     {step === 1 ? <form className="onboarding-form" onSubmit={saveProfile}>
       <div className="onboarding-fields two-col">
-        <OnboardingField label="Nama Usaha/Kepanitiaan" required icon={<Building2/>} value={values.storeName} placeholder="Contoh: Toko Kue Saya" onChange={v => set('storeName', v)} />
+        <OnboardingField label="Nama Usaha/Kepanitiaan" required icon={<Building2/>} value={values.storeName} placeholder="Contoh: Toko Kue Saya" hint="Gunakan huruf, angka, dan spasi saja." onChange={v => set('storeName', sanitizeBusinessName(v))} />
         <OnboardingField label="Nama Pemilik/Organisasi" required icon={<Building2/>} value={values.ownerName} placeholder="Contoh: Nama pemilik atau organisasi" onChange={v => set('ownerName', v)} />
       </div>
       <fieldset className="category-field"><legend>Kategori Produk Utama yang Dijual <b>*</b></legend><div className="category-options">{categories.map((item, index) => <button type="button" key={item} className={`category-chip ${category.includes(item) ? 'selected' : ''}`} onClick={() => setCategory(current => current.includes(item) ? current.filter(c => c !== item) : [...current, item])}><span>{index === 0 ? '▤' : index === 1 ? '◉' : '•••'}</span>{item}</button>)}</div></fieldset>
@@ -55,6 +84,6 @@ export default function Onboarding({ onComplete, initialStoreName = '', initialO
   </section></main>
 }
 
-function OnboardingField({ label, required, icon, value, placeholder, onChange, type = 'text' }: { label: string; required?: boolean; icon: React.ReactNode; value: string; placeholder: string; onChange: (value: string) => void; type?: string }) {
-  return <label className="onboarding-field"><span>{label}{required && <b> *</b>}</span><div className="onboarding-input"><i>{icon}</i><input type={type} value={value} placeholder={placeholder} onChange={event => onChange(event.target.value)} required={required} /></div></label>
+function OnboardingField({ label, required, icon, value, placeholder, onChange, type = 'text', hint }: { label: string; required?: boolean; icon: React.ReactNode; value: string; placeholder: string; onChange: (value: string) => void; type?: string; hint?: string }) {
+  return <label className="onboarding-field"><span>{label}{required && <b> *</b>}</span><div className="onboarding-input"><i>{icon}</i><input type={type} value={value} placeholder={placeholder} onChange={event => onChange(event.target.value)} required={required} /></div>{hint && <small>{hint}</small>}</label>
 }

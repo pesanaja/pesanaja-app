@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  ArrowLeft, ArrowRight, Camera, Check, Clock3, ImagePlus, LogOut,
+  ArrowLeft, ArrowRight, Camera, Check, ClipboardList, Clock3, ImagePlus, LogOut,
   Minus, Plus, Search, ShoppingCart, Store, Trash2, UserRound,
 } from 'lucide-react'
 import { supabase } from './lib/supabase'
 import { getOwnedProfileImagePath, removeProfileImage, uploadProfileImage, validateProfileImage } from './lib/profileImages'
+import { validatePaymentProof, type PaymentProofMime } from './lib/paymentProof'
+import { isValidPersonName, normalizePersonName } from './lib/nameValidation'
 import Education from './Education'
 
 type Product = {
@@ -19,26 +21,37 @@ type Product = {
   description: string
   imageUrl: string | null
   price: number
+  stock: number | null
   stockLimit: number | null
   closesAt: string | null
   paymentDetails: string | null
+  qrisImagePath: string | null
   pickupLocation: string | null
 }
 type CartLine = { product: Product; quantity: number; variant: string | null }
-type Page = 'home' | 'detail' | 'store' | 'cart' | 'checkout' | 'done' | 'education' | 'profile'
+type Page = 'home' | 'detail' | 'store' | 'cart' | 'checkout' | 'done' | 'education' | 'profile' | 'orders'
 type PaymentMethod = 'qris' | 'transfer' | 'cash'
+type PaymentPlan = 'full' | 'installment'
 type CreatedOrder = { orderId: string; paymentId: string; orderNumber: string; total: number }
+type BuyerPayment = { id: string; amount: number; status: string; method: string | null; proof_url: string | null; installment_number: number | null; due_at: string | null }
+type BuyerOrderItem = { product_name: string; variant: string | null; quantity: number; line_total: number }
+type BuyerOrder = { id: string; order_number: string; status: string; total: number; created_at: string; received_at: string | null; store: { store_name: string } | null; order_items: BuyerOrderItem[]; payments: BuyerPayment[] }
 type CatalogSort = 'recommended' | 'price-asc' | 'price-desc'
 type CatalogRow = {
   batch_id: string
   price: number
   stock_limit: number | null
-  product: { id: string; store_id: string; name: string; description: string | null; category: string | null; variants: string[]; image_url: string | null } | null
+  product: { id: string; store_id: string; name: string; description: string | null; category: string | null; variants: string[]; image_url: string | null; stock: number | null } | null
   batch: { id: string; name: string; store_id: string; closes_at: string | null } | null
 }
-type StoreRow = { user_id: string; store_name: string; description: string | null; payment_details: string | null; pickup_location: string | null; logo_url: string | null }
+type StoreRow = { user_id: string; store_name: string; description: string | null; payment_details: string | null; qris_image_path: string | null; pickup_location: string | null; logo_url: string | null }
 
 const money = (value: number) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(value)
+const orderStatusName = (status: string) => ({
+  ordered: 'Belum bayar', unpaid: 'Belum bayar', installment: 'Dicicil',
+  paid: 'Dibayar', completed: 'Dibayar', cancelled: 'Dibatalkan',
+}[status] ?? status)
+const paymentStatusName = (status: string) => status === 'paid' ? 'Dibayar' : 'Belum bayar'
 
 export default function BuyerStore({ userId, onSignOut }: { userId: string | null; onSignOut: () => void | Promise<void> }) {
   const [page, setPage] = useState<Page>('home')
@@ -47,7 +60,7 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
   const [storeProfile, setStoreProfile] = useState<StoreRow | null>(null)
   const [storeProfileLoading, setStoreProfileLoading] = useState(false)
   const [detailQuantity, setDetailQuantity] = useState(1)
-  const [selectedVariant, setSelectedVariant] = useState('')
+  const [selectedVariants, setSelectedVariants] = useState<string[]>([])
   const [cart, setCart] = useState<CartLine[]>([])
   const [search, setSearch] = useState('')
   const [categoryFilter, setCategoryFilter] = useState('Semua kategori')
@@ -64,8 +77,15 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
   const [profileSaving, setProfileSaving] = useState(false)
   const [profileNotice, setProfileNotice] = useState('')
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod | null>(null)
+  const [paymentPlan, setPaymentPlan] = useState<PaymentPlan>('full')
   const [proof, setProof] = useState<File | null>(null)
   const [createdOrder, setCreatedOrder] = useState<CreatedOrder | null>(null)
+  const [buyerOrders, setBuyerOrders] = useState<BuyerOrder[]>([])
+  const [ordersLoading, setOrdersLoading] = useState(false)
+  const [ordersError, setOrdersError] = useState('')
+  const [busyPaymentId, setBusyPaymentId] = useState<string | null>(null)
+  const [busyOrderId, setBusyOrderId] = useState<string | null>(null)
+  const [busyReceiptId, setBusyReceiptId] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -85,7 +105,7 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
     setError('')
     const { data, error: catalogError } = await supabase
       .from('batch_products')
-      .select('batch_id,price,stock_limit,product:products!inner(id,store_id,name,description,category,variants,image_url),batch:preorder_batches!inner(id,name,store_id,closes_at)')
+      .select('batch_id,price,stock_limit,product:products!inner(id,store_id,name,description,category,variants,image_url,stock),batch:preorder_batches!inner(id,name,store_id,closes_at)')
       .eq('batch.status', 'open')
       .eq('product.is_active', true)
     if (catalogError) {
@@ -96,7 +116,7 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
     const rows = (data ?? []) as unknown as CatalogRow[]
     const storeIds = [...new Set(rows.flatMap(row => row.product?.store_id ? [row.product.store_id] : []))]
     const storesResult = storeIds.length
-      ? await supabase.from('seller_profiles').select('user_id,store_name,description,payment_details,pickup_location').in('user_id', storeIds)
+      ? await supabase.from('seller_profiles').select('user_id,store_name,description,payment_details,qris_image_path,pickup_location').in('user_id', storeIds)
       : { data: [], error: null }
     if (storesResult.error) {
       setError(`Informasi toko gagal dimuat: ${storesResult.error.message}`)
@@ -105,8 +125,9 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
     }
     const stores = new Map(((storesResult.data ?? []) as unknown as StoreRow[]).map(store => [store.user_id, store]))
     const catalog = rows.flatMap(row => {
-      if (!row.product || !row.batch || row.stock_limit === 0 || !stores.has(row.product.store_id) || (row.batch.closes_at && new Date(row.batch.closes_at) <= new Date())) return []
+      if (!row.product || !row.batch || row.stock_limit === 0 || row.product.stock === 0 || !stores.has(row.product.store_id) || (row.batch.closes_at && new Date(row.batch.closes_at) <= new Date())) return []
       const store = stores.get(row.product.store_id)
+      const stockLimits = [row.stock_limit, row.product.stock].filter((limit): limit is number => limit !== null)
       return [{
         id: row.product.id,
         batchId: row.batch_id,
@@ -119,9 +140,11 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
         description: row.product.description ?? 'Produk pre-order pilihan dari toko kampus.',
         imageUrl: row.product.image_url,
         price: row.price,
-        stockLimit: row.stock_limit,
+        stock: row.product.stock,
+        stockLimit: stockLimits.length ? Math.min(...stockLimits) : null,
         closesAt: row.batch.closes_at,
         paymentDetails: store?.payment_details ?? null,
+        qrisImagePath: store?.qris_image_path ?? null,
         pickupLocation: store?.pickup_location ?? null,
       }]
     })
@@ -135,6 +158,28 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
   }, [userId])
 
   useEffect(() => { void loadStore() }, [loadStore])
+
+  const loadBuyerOrders = useCallback(async () => {
+    if (!supabase || !userId) {
+      setOrdersError('Sesi pembeli tidak tersedia. Silakan masuk kembali.')
+      setOrdersLoading(false)
+      return
+    }
+    setOrdersLoading(true)
+    setOrdersError('')
+    const { data, error: loadError } = await supabase
+      .from('orders')
+      .select('id,order_number,status,total,created_at,received_at,store:seller_profiles!orders_store_id_fkey(store_name),order_items(product_name,variant,quantity,line_total),payments(id,amount,status,method,proof_url,installment_number,due_at)')
+      .eq('buyer_id', userId)
+      .order('created_at', { ascending: false })
+    if (loadError) setOrdersError(`Pesanan gagal dimuat: ${loadError.message}`)
+    else setBuyerOrders((data ?? []) as unknown as BuyerOrder[])
+    setOrdersLoading(false)
+  }, [userId])
+
+  useEffect(() => {
+    if (page === 'orders') void loadBuyerOrders()
+  }, [page, loadBuyerOrders])
 
   useEffect(() => {
     if (page !== 'profile') return
@@ -177,8 +222,6 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
     if (avatarPreview) URL.revokeObjectURL(avatarPreview)
   }, [avatarPreview])
 
-  useEffect(() => { void loadStore() }, [loadStore])
-
   useEffect(() => {
     const refreshWhenVisible = () => {
       if (document.visibilityState === 'visible') void loadStore(false)
@@ -207,11 +250,16 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
   }, [products, search, categoryFilter, storeFilter, catalogSort])
   const cartTotal = cart.reduce((total, line) => total + line.product.price * line.quantity, 0)
   const cartCount = cart.reduce((total, line) => total + line.quantity, 0)
+  const firstInstallment = Math.ceil(cartTotal / 2)
+  const remainingInstallments = cartTotal - firstInstallment
+  const secondInstallment = Math.ceil(remainingInstallments / 2)
+  const thirdInstallment = remainingInstallments - secondInstallment
   const openProduct = (product: Product) => {
     setSelected(product)
-    const cartLine = cart.find(line => line.product.id === product.id)
-    setDetailQuantity(cartLine?.quantity ?? 1)
-    setSelectedVariant(cartLine?.variant ?? product.variants[0] ?? '')
+    const cartLines = cart.filter(line => line.product.id === product.id)
+    setDetailQuantity(cartLines[0]?.quantity ?? 1)
+    const selected = cartLines.flatMap(line => line.variant ? [line.variant] : [])
+    setSelectedVariants(selected.length ? selected : product.variants.slice(0, 1))
     setError('')
     setPage('detail')
   }
@@ -223,7 +271,7 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
     setPage('store')
     const { data, error: profileError } = await supabase
       .from('seller_profiles')
-      .select('user_id,store_name,description,payment_details,pickup_location,logo_url')
+      .select('user_id,store_name,description,payment_details,qris_image_path,pickup_location,logo_url')
       .eq('user_id', storeId)
       .maybeSingle()
     setStoreProfileLoading(false)
@@ -242,42 +290,106 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
     setError('')
     setPage('education')
   }
-  const changeQuantity = (product: Product, change: number) => {
-    setCart(current => current.flatMap(line => {
-      if (line.product.id !== product.id) return [line]
+  const changeQuantity = (product: Product, variant: string | null, change: number) => {
+    setCart(current => {
+      const currentLine = current.find(line => line.product.id === product.id && line.variant === variant)
+      if (!currentLine) return current
+      const otherQuantity = current
+        .filter(line => line.product.id === product.id && line.variant !== variant)
+        .reduce((total, line) => total + line.quantity, 0)
       const limit = product.stockLimit ?? 99
-      const quantity = Math.min(limit, Math.max(0, line.quantity + change))
-      return quantity ? [{ ...line, quantity }] : []
-    }))
+      const quantity = Math.min(Math.max(0, limit - otherQuantity), Math.max(0, currentLine.quantity + change))
+      return current.flatMap(line => {
+        if (line.product.id !== product.id || line.variant !== variant) return [line]
+        return quantity ? [{ ...line, quantity }] : []
+      })
+    })
   }
-  const addToCart = (product: Product, quantity = 1, variant: string | null = null) => {
-    if (product.variants.length && !variant) {
-      setError('Pilih varian produk terlebih dahulu.')
+  const addToCart = (product: Product, quantity = 1, variants: string[] = []) => {
+    if (product.variants.length && !variants.length) {
+      setError('Pilih minimal satu varian produk terlebih dahulu.')
       return
     }
     if (cart.length && cart[0].product.batchId !== product.batchId) {
       setError('Keranjang hanya bisa berisi produk dari satu batch pre-order.')
       return
     }
+    const selections = product.variants.length ? variants : [null]
+    const currentQuantity = cart
+      .filter(line => line.product.id === product.id)
+      .reduce((total, line) => total + line.quantity, 0)
+    const additionalQuantity = selections.reduce((total, variant) => {
+      const existing = cart.find(line => line.product.id === product.id && line.variant === variant)
+      return total + Math.max(0, quantity - (existing?.quantity ?? 0))
+    }, 0)
+    if (product.stockLimit !== null && currentQuantity + additionalQuantity > product.stockLimit) {
+      setError(`Jumlah melebihi stok tersedia (${product.stockLimit}). Kurangi jumlah atau pilihan varian.`)
+      return
+    }
     setCart(current => {
-      const existing = current.find(line => line.product.id === product.id)
-      if (existing) return current.map(line => line.product.id === product.id
-        ? { ...line, quantity: Math.min(product.stockLimit ?? 99, quantity), variant }
-        : line)
-      return [...current, { product, quantity: Math.min(product.stockLimit ?? 99, quantity), variant }]
+      const updated = [...current]
+      for (const variant of selections) {
+        const existingIndex = updated.findIndex(line => line.product.id === product.id && line.variant === variant)
+        const line = { product, quantity: Math.min(product.stockLimit ?? 99, quantity), variant }
+        if (existingIndex >= 0) updated[existingIndex] = line
+        else updated.push(line)
+      }
+      return updated
     })
     setError('')
     setPage('cart')
   }
 
-  async function uploadProof(order: CreatedOrder, file: File) {
+  async function uploadProof(order: CreatedOrder, file: File, contentType: PaymentProofMime) {
     if (!supabase || !userId) throw new Error('Silakan masuk kembali sebelum mengunggah bukti pembayaran.')
     const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '-')
     const path = `${userId}/${order.orderId}/${Date.now()}-${safeName}`
-    const { error: uploadError } = await supabase.storage.from('payment-proofs').upload(path, file, { contentType: file.type, upsert: false })
+    const { error: uploadError } = await supabase.storage.from('payment-proofs').upload(path, file, { contentType, upsert: false })
     if (uploadError) throw uploadError
     const { error: proofError } = await supabase.rpc('attach_payment_proof', { p_payment_id: order.paymentId, p_proof_path: path })
     if (proofError) throw proofError
+  }
+
+  async function uploadInstallmentProof(orderId: string, paymentId: string, file: File, contentType: PaymentProofMime) {
+    if (!supabase || !userId) {
+      setOrdersError('Silakan masuk kembali sebelum mengunggah bukti pembayaran.')
+      return
+    }
+    setBusyPaymentId(paymentId)
+    setOrdersError('')
+    try {
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '-')
+      const path = `${userId}/${orderId}/${Date.now()}-${safeName}`
+      const { error: uploadError } = await supabase.storage.from('payment-proofs').upload(path, file, { contentType, upsert: false })
+      if (uploadError) throw uploadError
+      const { error: attachError } = await supabase.rpc('attach_payment_proof', { p_payment_id: paymentId, p_proof_path: path })
+      if (attachError) throw attachError
+      await loadBuyerOrders()
+    } catch (cause) {
+      setOrdersError(cause instanceof Error ? cause.message : 'Bukti pembayaran gagal diunggah.')
+    } finally {
+      setBusyPaymentId(null)
+    }
+  }
+
+  async function cancelBuyerOrder(orderId: string) {
+    if (!supabase || !window.confirm('Batalkan pesanan ini?')) return
+    setBusyOrderId(orderId)
+    setOrdersError('')
+    const { error: cancelError } = await supabase.rpc('cancel_buyer_order', { p_order_id: orderId })
+    if (cancelError) setOrdersError(`Pesanan gagal dibatalkan: ${cancelError.message}`)
+    else await loadBuyerOrders()
+    setBusyOrderId(null)
+  }
+
+  async function confirmOrderReceived(orderId: string) {
+    if (!supabase) return
+    setBusyReceiptId(orderId)
+    setOrdersError('')
+    const { error: receiveError } = await supabase.rpc('confirm_order_received', { p_order_id: orderId })
+    if (receiveError) setOrdersError(`Konfirmasi penerimaan gagal: ${receiveError.message}`)
+    else await loadBuyerOrders()
+    setBusyReceiptId(null)
   }
 
   async function submitPayment(event: React.FormEvent<HTMLFormElement>) {
@@ -286,15 +398,16 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
     setProfileNotice('')
     if (!supabase || !userId) { setError('Silakan masuk kembali untuk melanjutkan pembayaran.'); return }
     if (!paymentMethod) { setError('Pilih metode pembayaran terlebih dahulu.'); return }
-    if (paymentMethod !== 'cash' && !proof && !createdOrder) { setError('Unggah bukti pembayaran untuk melanjutkan.'); return }
-    if (!buyerName.trim()) { setError('Nama lengkap wajib diisi.'); return }
+    if (paymentMethod === 'qris' && !cart[0]?.product.qrisImagePath) { setError('Penjual belum memiliki QRIS. Pilih transfer atau hubungi penjual.'); return }
+    if (paymentMethod === 'transfer' && !cart[0]?.product.paymentDetails?.trim()) { setError('Penjual belum mengisi informasi rekening. Pilih metode lain atau hubungi penjual.'); return }
+    if (paymentMethod !== 'cash' && !proof) { setError('Unggah bukti pembayaran untuk melanjutkan.'); return }
+    if (!isValidPersonName(buyerName)) { setError('Nama pada profil harus berisi huruf. Perbarui nama di profil pembeli sebelum membayar.'); return }
     setSaving(true)
     try {
+      const proofMime = paymentMethod !== 'cash' && proof ? await validatePaymentProof(proof) : null
       let order = createdOrder
       if (!order) {
-        const { error: profileError } = await supabase.from('profiles').upsert({ id: userId, full_name: buyerName.trim() }, { onConflict: 'id' })
-        if (profileError) throw profileError
-        const { data, error: orderError } = await supabase.rpc('create_buyer_order', {
+        const { data, error: orderError } = await supabase.rpc(paymentPlan === 'installment' ? 'create_buyer_installment_order' : 'create_buyer_order', {
           p_batch_id: cart[0].product.batchId,
           p_items: cart.map(line => ({ product_id: line.product.id, quantity: line.quantity, variant: line.variant })),
           p_method: paymentMethod,
@@ -305,7 +418,7 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
         order = { orderId: row.order_id, paymentId: row.payment_id, orderNumber: row.order_number, total: row.total }
         setCreatedOrder(order)
       }
-      if (paymentMethod !== 'cash' && proof) await uploadProof(order, proof)
+      if (paymentMethod !== 'cash' && proof && proofMime) await uploadProof(order, proof, proofMime)
       setPage('done')
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Pembayaran belum berhasil dikirim. Coba lagi.')
@@ -314,6 +427,7 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
 
   const startCheckout = () => {
     setPaymentMethod(null)
+    setPaymentPlan('full')
     setProof(null)
     setCreatedOrder(null)
     setError('')
@@ -327,6 +441,10 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
       setError('Sesi pembeli tidak tersedia. Silakan masuk kembali.')
       return
     }
+    if (!isValidPersonName(profileName)) {
+      setError('Nama pembeli harus berisi huruf dan hanya boleh memakai spasi, tanda hubung, atau apostrof.')
+      return
+    }
     setProfileSaving(true)
     let uploadedPath: string | null = null
     try {
@@ -338,7 +456,7 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
       }
       const { error: saveError } = await supabase.from('profiles').upsert({
         id: userId,
-        full_name: profileName.trim(),
+        full_name: normalizePersonName(profileName),
         phone: profilePhone.trim() || null,
         avatar_url: avatarUrl,
       }, { onConflict: 'id' })
@@ -350,7 +468,7 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
         throw new Error(`Profil gagal disimpan: ${saveError.message}`)
       }
       const oldPath = avatarFile ? getOwnedProfileImagePath(profileAvatar, userId) : null
-      setBuyerName(profileName.trim())
+      setBuyerName(normalizePersonName(profileName))
       setProfileAvatar(avatarUrl)
       setAvatarFile(null)
       setAvatarPreview('')
@@ -373,6 +491,7 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
       </button>
       <nav><button className={page === 'education' ? 'selected' : ''} onClick={openEducation}>Edukasi</button><button className={page !== 'education' ? 'selected' : ''} onClick={() => setPage('home')}>Belanja</button></nav>
       <div className="storefront-actions">
+        <button className={`storefront-orders-shortcut ${page === 'orders' ? 'active' : ''}`} aria-label="Pesanan Saya" title="Pesanan Saya" onClick={() => setPage('orders')}><ClipboardList size={16}/><span>Pesanan Saya</span></button>
         <button className="storefront-cart-link" aria-label={`Keranjang, ${cartCount} produk`} onClick={() => setPage('cart')}><ShoppingCart size={21}/>{cartCount > 0 && <span>{cartCount}</span>}</button>
         <button className={`storefront-buyer-name ${page === 'profile' ? 'is-active' : ''}`} onClick={() => { setError(''); setPage('profile') }}>{profileAvatar ? <img src={profileAvatar} alt=""/> : <UserRound size={16}/>}<span>{buyerName || 'Pembeli'}</span></button>
         <button className="storefront-signout" aria-label="Keluar" onClick={() => void signOut()}><LogOut size={17}/></button>
@@ -380,7 +499,7 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
     </header>
 
     {page === 'home' && <section className="storefront-home">
-      <div className="storefront-welcome"><p>Pre-Order kampus lebih mudah bersama PesanAja</p><h1>Selamat Pagi!</h1><h2>Lagi pengen jajan apa?</h2></div>
+      <div className="storefront-welcome"><h1>Selamat Pagi!</h1><h2>Lagi pengen jajan apa?</h2></div>
       <div className="catalog-toolbar">
         <label className="storefront-search"><Search size={18}/><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Cari produk atau toko"/><span>Cari</span></label>
         <label className="catalog-filter">Toko<select value={storeFilter} onChange={event => setStoreFilter(event.target.value)}><option>Semua toko</option>{stores.map(store => <option key={store.id} value={store.id}>{store.name}</option>)}</select></label>
@@ -408,7 +527,52 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
       <footer className="storefront-footer"><img src="/assets/pesanaja-logo-concept.svg" alt="PesanAja"/><small>© 2026 PesanAja Indonesia</small></footer>
     </section>}
 
-    {page === 'education' && <section className="storefront-page education-page"><button className="storefront-back" onClick={() => setPage('home')}><ArrowLeft size={18}/> Kembali</button><Education role="buyer"/></section>}
+    {page === 'education' && <section className="storefront-page education-page"><Education role="buyer"/></section>}
+
+    {page === 'orders' && <section className="storefront-page buyer-orders-page">
+      <button className="storefront-back" onClick={() => setPage('home')}><ArrowLeft size={18}/> Kembali</button>
+      <header className="buyer-orders-heading"><div><span>PESANAJA</span><h1>Pesanan Saya</h1><p>Lihat status pesanan dan jadwal pembayaranmu.</p></div><button className="storefront-refresh" onClick={() => void loadBuyerOrders()} disabled={ordersLoading}>Muat ulang</button></header>
+      {ordersError && <p className="storefront-error" role="alert">{ordersError}</p>}
+      {ordersLoading ? <div className="storefront-empty">Memuat pesanan…</div> : buyerOrders.length ? <div className="buyer-orders-list">
+        {buyerOrders.map(order => {
+          const orderPayments = [...(order.payments ?? [])].sort((a, b) => (a.installment_number ?? 1) - (b.installment_number ?? 1))
+          const canCancel = ['unpaid', 'ordered', 'installment'].includes(order.status) && !orderPayments.some(payment => payment.status === 'paid')
+          const canConfirmReceipt = ['paid', 'completed'].includes(order.status) && !order.received_at
+          return <article className="buyer-order-card" key={order.id}>
+            <header><div><b>{order.order_number}</b><small>{new Date(order.created_at).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}</small></div><span className={`buyer-order-status ${order.received_at ? 'received' : order.status}`}>{order.received_at ? 'Pesanan diterima' : orderStatusName(order.status)}</span></header>
+            <p className="buyer-order-store">Penjual: <b>{order.store?.store_name ?? 'Toko kampus'}</b></p>
+            <div className="buyer-order-items">{(order.order_items ?? []).map((item, index) => <div key={`${item.product_name}-${item.variant ?? ''}-${index}`}><span>{item.product_name}{item.variant ? ` · ${item.variant}` : ''} × {item.quantity}</span><b>{money(item.line_total)}</b></div>)}</div>
+            <div className="buyer-order-total"><span>Total pesanan</span><b>{money(order.total)}</b></div>
+            {orderPayments.length > 0 && <div className="buyer-installment-list">{orderPayments.map(payment => {
+              const previousUnpaid = payment.installment_number !== null && orderPayments.some(previous => (previous.installment_number ?? 0) < payment.installment_number! && previous.status !== 'paid')
+              const due = payment.due_at ? new Date(payment.due_at).toLocaleDateString('id-ID', { dateStyle: 'medium' }) : null
+              return <div className="buyer-installment-row" key={payment.id}>
+                <div><b>{payment.installment_number ? `Cicilan ${payment.installment_number} dari 3` : 'Pembayaran'}</b><span>{due ? `Jatuh tempo ${due}` : payment.method === 'cash' ? 'Bayar tunai ke penjual' : 'Unggah bukti setelah membayar'}</span></div>
+                <strong>{money(payment.amount)}</strong>
+                <span className={`buyer-payment-status ${payment.status === 'paid' ? 'paid' : ''}`}>{paymentStatusName(payment.status)}</span>
+                {payment.status !== 'paid' && payment.method !== 'cash' && !payment.proof_url && !previousUnpaid && order.status !== 'cancelled' && <label className="buyer-proof-upload">
+                  <input type="file" accept=".png,.jpg,.jpeg,.pdf,image/png,image/jpeg,application/pdf" disabled={busyPaymentId === payment.id} onChange={event => {
+                    const file = event.target.files?.[0] ?? null
+                    event.target.value = ''
+                    if (!file) return
+                    void validatePaymentProof(file)
+                      .then(contentType => uploadInstallmentProof(order.id, payment.id, file, contentType))
+                      .catch(cause => setOrdersError(cause instanceof Error ? cause.message : 'Format bukti pembayaran tidak valid.'))
+                  }}/>
+                  {busyPaymentId === payment.id ? 'Mengunggah…' : 'Unggah bukti'}
+                </label>}
+                {payment.proof_url && payment.status !== 'paid' && <small className="buyer-proof-pending">Menunggu konfirmasi penjual</small>}
+                {payment.status !== 'paid' && payment.method === 'cash' && <small className="buyer-proof-pending">Konfirmasi setelah dibayar tunai</small>}
+                {previousUnpaid && payment.status !== 'paid' && <small className="buyer-proof-pending">Selesaikan cicilan sebelumnya terlebih dahulu</small>}
+              </div>
+            })}</div>}
+            {canCancel && <button className="buyer-cancel-order" disabled={busyOrderId === order.id} onClick={() => void cancelBuyerOrder(order.id)}>{busyOrderId === order.id ? 'Membatalkan…' : 'Batalkan pesanan'}</button>}
+            {canConfirmReceipt && <button className="buyer-received-button" disabled={busyReceiptId === order.id} onClick={() => void confirmOrderReceived(order.id)}>{busyReceiptId === order.id ? 'Menyimpan…' : 'Konfirmasi pesanan diterima'}</button>}
+            {order.received_at && <small className="buyer-received-time">Dikonfirmasi {new Date(order.received_at).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}</small>}
+          </article>
+        })}
+      </div> : <div className="storefront-empty"><div>🧾</div><h2>Belum ada pesanan</h2><p>Pesanan dan status pembayarannya akan tampil di sini.</p><button className="store-pill-button" onClick={() => setPage('home')}>Mulai belanja</button></div>}
+    </section>}
 
     {page === 'profile' && <section className="storefront-page buyer-profile-page">
       <button className="storefront-back" onClick={() => setPage('home')}><ArrowLeft size={18}/> Kembali</button>
@@ -445,8 +609,9 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
           <p className="detail-deadline"><Clock3 size={17}/>{selected.closesAt ? `Tutup ${new Date(selected.closesAt).toLocaleString('id-ID', { dateStyle: 'long', timeStyle: 'short' })}` : 'Pre-order sedang dibuka'}</p>
           <strong className="detail-price">{money(selected.price)}</strong>
           <div className="detail-seller"><button className="detail-store" onClick={() => void openStoreProfile(selected.storeId)} aria-label={`Lihat profil toko ${selected.storeName}`}><span className="detail-store-mark">{selected.storeName.slice(0, 1).toUpperCase()}</span><b>{selected.storeName}</b></button></div>
-          {selected.variants.length > 0 && <label className="detail-variant-select">Pilih varian<select value={selectedVariant} onChange={event => setSelectedVariant(event.target.value)}><option value="">Pilih varian</option>{selected.variants.map(variant => <option key={variant} value={variant}>{variant}</option>)}</select></label>}
-          <div className="detail-buy-row"><div className="quantity-control"><button aria-label="Kurangi jumlah" onClick={() => setDetailQuantity(value => Math.max(1, value - 1))}><Minus size={14}/></button><b>{detailQuantity}</b><button aria-label="Tambah jumlah" onClick={() => setDetailQuantity(value => Math.min(selected.stockLimit ?? 99, value + 1))}><Plus size={14}/></button></div><button className="store-pill-button" onClick={() => addToCart(selected, detailQuantity, selected.variants.length ? selectedVariant || null : null)}>Masukkan keranjang</button></div>
+          {selected.variants.length > 0 && <fieldset className="detail-variant-select"><legend>Pilih satu atau beberapa varian</legend>{selected.variants.map(variant => <label key={variant}><input type="checkbox" checked={selectedVariants.includes(variant)} onChange={event => setSelectedVariants(current => event.target.checked ? [...current, variant] : current.filter(value => value !== variant))}/>{variant}</label>)}</fieldset>}
+          <div className="detail-buy-row"><div className="quantity-control"><button aria-label="Kurangi jumlah" disabled={detailQuantity <= 1} onClick={() => setDetailQuantity(value => Math.max(1, value - 1))}><Minus size={14}/></button><b>{detailQuantity}</b><button aria-label="Tambah jumlah" disabled={selected.stockLimit !== null && detailQuantity >= selected.stockLimit} title={selected.stockLimit !== null && detailQuantity >= selected.stockLimit ? 'Batas stok produk tercapai' : 'Tambah jumlah'} onClick={() => setDetailQuantity(value => Math.min(selected.stockLimit ?? 99, value + 1))}><Plus size={14}/></button></div><button className="store-pill-button" onClick={() => addToCart(selected, detailQuantity, selectedVariants)}>Masukkan keranjang</button></div>
+          {selected.stockLimit !== null && <small className="product-stock-note">Batas jumlah pesanan produk ini: {selected.stockLimit}</small>}
         </div>
       </div>
       <section className="detail-description"><h2>Deskripsi</h2><p>{selected.description}</p><p><b>Batch:</b> {selected.batchName}</p>{selected.pickupLocation && <p><b>Lokasi pengambilan:</b> {selected.pickupLocation}</p>}</section>
@@ -467,11 +632,11 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
       <h1>Keranjang ({cartCount})</h1>
       {cart.length ? <>
         <div className="cart-store-name"><span>{cart[0].product.storeName.slice(0, 1).toUpperCase()}</span><b>{cart[0].product.storeName}</b></div>
-        {cart.map(line => <article className="cart-line" key={line.product.id}>
+        {cart.map(line => <article className="cart-line" key={`${line.product.id}-${line.variant ?? 'default'}`}>
           <ProductImage product={line.product}/>
-          <div className="cart-line-info"><button onClick={() => openProduct(line.product)}>{line.product.name}</button>{line.variant && <p>Varian: {line.variant}</p>}<p>Batch: {line.product.batchName}</p><strong>{money(line.product.price * line.quantity)}</strong></div>
-          <div className="quantity-control"><button aria-label="Kurangi jumlah" onClick={() => changeQuantity(line.product, -1)}><Minus size={14}/></button><b>{line.quantity}</b><button aria-label="Tambah jumlah" onClick={() => changeQuantity(line.product, 1)}><Plus size={14}/></button></div>
-          <button className="cart-remove" aria-label={`Hapus ${line.product.name}`} onClick={() => setCart(current => current.filter(item => item.product.id !== line.product.id))}><Trash2 size={18}/></button>
+          <div className="cart-line-info"><button onClick={() => openProduct(line.product)}>{line.product.name}</button>{line.variant && <p>Varian: {line.variant}</p>}<p>Batch: {line.product.batchName}</p>{line.product.stockLimit !== null && <p>Batas jumlah: {line.product.stockLimit}</p>}<strong>{money(line.product.price * line.quantity)}</strong></div>
+          <div className="quantity-control"><button aria-label="Kurangi jumlah" onClick={() => changeQuantity(line.product, line.variant, -1)}><Minus size={14}/></button><b>{line.quantity}</b><button aria-label="Tambah jumlah" disabled={line.product.stockLimit !== null && cart.filter(item => item.product.id === line.product.id).reduce((total, item) => total + item.quantity, 0) >= line.product.stockLimit} onClick={() => changeQuantity(line.product, line.variant, 1)}><Plus size={14}/></button></div>
+          <button className="cart-remove" aria-label={`Hapus ${line.product.name}${line.variant ? ` varian ${line.variant}` : ''}`} onClick={() => setCart(current => current.filter(item => item.product.id !== line.product.id || item.variant !== line.variant))}><Trash2 size={18}/></button>
         </article>)}
         <div className="cart-checkout-bar"><div><strong>{money(cartTotal)}</strong><span>{cartCount} produk</span></div><button className="store-pill-button" onClick={startCheckout}>Beli sekarang <ArrowRight size={17}/></button></div>
       </> : <div className="storefront-empty"><div>🛒</div><h2>Keranjang masih kosong</h2><p>Pilih produk yang kamu suka dan tambahkan ke keranjang.</p><button className="store-pill-button" onClick={() => setPage('home')}>Mulai belanja</button></div>}
@@ -480,32 +645,34 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
     {page === 'checkout' && <section className="storefront-page checkout-page">
       <h1>Pembayaran</h1><form onSubmit={submitPayment}>
         <div className="checkout-columns"><div className="checkout-fields">
-          <label className="checkout-label">Nama Lengkap<div className="checkout-input"><UserRound size={18}/><input value={buyerName} onChange={event => setBuyerName(event.target.value)} placeholder="Nama Lengkap" required disabled={Boolean(createdOrder)}/></div></label>
+          <label className="checkout-label">Nama Lengkap<div className="checkout-input"><UserRound size={18}/><input value={buyerName} placeholder="Nama dari profil pembeli" readOnly aria-readonly="true" required/></div><small>Nama pembayaran mengikuti profil pembeli. Ubah nama dari menu profil jika perlu.</small></label>
+          <fieldset className="payment-methods"><legend>Pilih skema pembayaran</legend>
+            <label className="buyer-payment-plan"><input type="radio" name="payment-plan" checked={paymentPlan === 'full'} disabled={Boolean(createdOrder)} onChange={() => setPaymentPlan('full')}/><span>Bayar penuh</span></label>
+            <label className="buyer-payment-plan"><input type="radio" name="payment-plan" checked={paymentPlan === 'installment'} disabled={Boolean(createdOrder)} onChange={() => setPaymentPlan('installment')}/><span>Cicilan: DP 50%, lalu 2 kali pembayaran mingguan</span></label>
+            {paymentPlan === 'installment' && <p className="buyer-installment-hint">DP {money(firstInstallment)} sekarang, lalu {money(secondInstallment)} dalam 7 hari dan {money(thirdInstallment)} dalam 14 hari. Cicilan berikutnya baru dapat dikonfirmasi setelah cicilan sebelumnya. Pesanan yang sudah menerima pembayaran tidak dapat dibatalkan dari aplikasi.</p>}
+          </fieldset>
           <fieldset className="payment-methods"><legend>Pilih Metode Pembayaran</legend>
             {([
-              ['qris', 'QRIS', 'Ikuti petunjuk QRIS dari penjual dan unggah bukti pembayaran.'],
+              ['qris', 'QRIS', 'Ikuti petunjuk QRIS penjual, pastikan nama merchant dan nominal sesuai, lalu unggah bukti pembayaran.'],
               ['transfer', 'Transfer ke penjual', 'Transfer ke rekening/e-wallet penjual dan unggah bukti pembayaran.'],
               ['cash', 'Tunai', 'Bayar tunai kepada penjual saat mengambil pesanan.'],
             ] as const).map(([method, label, instruction]) => <div className={`payment-option ${paymentMethod === method ? 'expanded' : ''}`} key={method}>
               <label><input type="radio" name="payment-method" checked={paymentMethod === method} disabled={Boolean(createdOrder)} onChange={() => { setPaymentMethod(method); setError('') }}/><span>{label}</span></label>
-              {paymentMethod === method && <div className="payment-instructions"><p>{instruction}</p>{method === 'qris' && <p className="seller-payment-details">Penjual belum memiliki QRIS.</p>}{method === 'transfer' && <p className="seller-payment-details">{cart[0]?.product.paymentDetails || 'Penjual belum mengisi informasi pembayaran. Hubungi penjual sebelum membayar.'}</p>}</div>}
+              {paymentMethod === method && <div className="payment-instructions"><p>{instruction}</p>{method === 'qris' && (cart[0]?.product.qrisImagePath && supabase
+                ? <img className="seller-qris-image" src={supabase.storage.from('seller-qris').getPublicUrl(cart[0].product.qrisImagePath).data.publicUrl} alt={`QRIS ${cart[0].product.storeName}`}/>
+                : <p className="seller-payment-details">Penjual belum memiliki QRIS.</p>)}{method === 'transfer' && <p className="seller-payment-details">{cart[0]?.product.paymentDetails || 'Penjual belum mengisi informasi rekening. Hubungi penjual sebelum membayar.'}</p>}</div>}
             </div>)}
           </fieldset>
-          {paymentMethod && paymentMethod !== 'cash' && (
+          {paymentMethod && paymentMethod !== 'cash'
+            && (paymentMethod === 'qris' ? Boolean(cart[0]?.product.qrisImagePath) : Boolean(cart[0]?.product.paymentDetails?.trim())) && (
             <div className="checkout-label">
               <span>Bukti Pembayaran</span>
               <label className={`proof-upload ${proof ? 'has-file' : ''}`}>
-                <input
+                    <input
                   type="file"
                   accept=".png,.jpg,.jpeg,.pdf,image/png,image/jpeg,application/pdf"
-                  disabled={Boolean(createdOrder)}
                   onChange={event => {
                     const file = event.target.files?.[0] ?? null
-                    if (file && file.size > 5 * 1024 * 1024) {
-                      setProof(null)
-                      setError('Ukuran bukti pembayaran maksimal 5 MB.')
-                      return
-                    }
                     setProof(file)
                     setError('')
                   }}
@@ -515,17 +682,17 @@ export default function BuyerStore({ userId, onSignOut }: { userId: string | nul
             </div>
           )}
           {error && <p className="storefront-error" role="alert">{error}</p>}
-        </div><aside className="checkout-summary"><h2>Informasi Produk</h2>{cart.map(line => <div className="checkout-product" key={line.product.id}><ProductImage product={line.product}/><div><b>{line.product.name}</b><span>{line.product.category}</span>{line.variant && <span>Varian: {line.variant}</span>}<span>Qty: {line.quantity}</span><strong>{money(line.product.price * line.quantity)}</strong></div></div>)}<h2>Ringkasan Pesanan</h2><div className="summary-row"><span>Subtotal</span><span>{money(cartTotal)}</span></div><div className="summary-row"><span>Biaya Layanan</span><span>{money(0)}</span></div><div className="summary-total"><span>Total</span><strong>{money(cartTotal)}</strong></div></aside></div>
+        </div><aside className="checkout-summary"><h2>Informasi Produk</h2>{cart.map((line, index) => <div className="checkout-product" key={`${line.product.id}-${line.variant ?? 'default'}-${index}`}><ProductImage product={line.product}/><div><b>{line.product.name}</b><span>{line.product.category}</span>{line.variant && <span>Varian: {line.variant}</span>}<span>Qty: {line.quantity}</span><strong>{money(line.product.price * line.quantity)}</strong></div></div>)}<h2>Ringkasan Pesanan</h2><div className="summary-row"><span>Subtotal</span><span>{money(cartTotal)}</span></div><div className="summary-row"><span>Biaya Layanan</span><span>{money(0)}</span></div><div className="summary-total"><span>Total</span><strong>{money(cartTotal)}</strong></div></aside></div>
         <button className="store-pill-button checkout-submit" type="submit" disabled={saving}>{saving ? 'Memproses…' : createdOrder ? 'Coba unggah bukti lagi' : 'Konfirmasi'}</button>
       </form>
     </section>}
 
-    {page === 'done' && createdOrder && <section className="storefront-success"><div className="payment-success-icon"><Check size={34}/></div><h1>{paymentMethod === 'cash' ? 'Pesanan terkirim ke penjual' : 'Pembayaran terkirim ke penjual'}</h1><p>Pesanan <b>{createdOrder.orderNumber}</b> sudah masuk ke penjual{paymentMethod === 'cash' ? ' dan menunggu konfirmasi setelah pembayaran tunai diterima.' : ' dan menunggu konfirmasi setelah pembayaran diperiksa.'}</p><div className="success-order-total"><span>Total pesanan</span><b>{money(createdOrder.total)}</b></div><button className="store-pill-button" onClick={() => { setCart([]); setCreatedOrder(null); setProof(null); setPaymentMethod(null); setPage('home') }}>Kembali ke beranda</button></section>}
+    {page === 'done' && createdOrder && <section className="storefront-success"><div className="payment-success-icon"><Check size={34}/></div><h1>{paymentPlan === 'installment' ? 'Pesanan dicicil' : paymentMethod === 'cash' ? 'Pesanan terkirim ke penjual' : 'Pembayaran terkirim ke penjual'}</h1><p>Pesanan <b>{createdOrder.orderNumber}</b> {paymentPlan === 'installment' ? 'dibuat dengan DP 50% dan dua cicilan mingguan. Lihat jadwal dan status di Pesanan Saya.' : `sudah masuk ke penjual${paymentMethod === 'cash' ? ' dan menunggu konfirmasi setelah pembayaran tunai diterima.' : ' dan menunggu konfirmasi setelah pembayaran diperiksa.'}`}</p><div className="success-order-total"><span>Total pesanan</span><b>{money(createdOrder.total)}</b></div><button className="store-pill-button" onClick={() => { setCart([]); setCreatedOrder(null); setProof(null); setPaymentMethod(null); setPaymentPlan('full'); setPage(paymentPlan === 'installment' ? 'orders' : 'home') }}>{paymentPlan === 'installment' ? 'Lihat Pesanan Saya' : 'Kembali ke beranda'}</button></section>}
   </main>
 }
 
 function ProductImage({ product, large = false }: { product: Product; large?: boolean }) {
   return <div className={`store-product-image ${large ? 'large' : ''}`}>
-    {product.imageUrl ? <img src={product.imageUrl} alt={product.name}/> : <span aria-hidden="true">{product.category.toLowerCase().includes('minum') ? '🧋' : product.category.toLowerCase().includes('kue') || product.category.toLowerCase().includes('dessert') ? '🍪' : '🍱'}</span>}
+    {product.imageUrl ? <img src={product.imageUrl} alt={product.name}/> : <span className="product-image-placeholder">Foto belum tersedia</span>}
   </div>
 }

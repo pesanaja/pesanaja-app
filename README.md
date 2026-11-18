@@ -15,33 +15,42 @@ Isi `.env.local` dari `.env.example` untuk mengaktifkan Supabase Auth, dashboard
 
 Skema awal tersedia sebagai migration di `supabase/migrations`. Terapkan setelah project Supabase dikonfirmasi untuk menerima perubahan. Migrasi mengaktifkan RLS pada semua tabel publik.
 
-Untuk mengaktifkan katalog pembeli, checkout manual, dan dashboard penjual, terapkan semua migration secara berurutan, termasuk `20261108130000_buyer_checkout.sql`, `20261108140000_seller_nim_identity.sql`, `20261108150000_restrict_seller_email_domain.sql`, `20261108160000_create_seller_batch.sql`, `20261108170000_product_image_uploads.sql`, dan `20261108180000_product_variants.sql`. NIM penjual disimpan di tabel privat berindeks. Dashboard memakai produk, batch, pesanan, dan pembayaran dari Supabase; data baru tampil setelah pengguna membuatnya. Produk tampil di halaman belanja setelah toko terverifikasi, produk aktif, dan produk dimasukkan ke batch terbuka. Foto produk dapat diunggah sebagai PNG, JPG, atau WEBP hingga 5 MB. Penjual dapat menambahkan pilihan varian pada produk; pembeli memilih varian sebelum menambahkan produk ke keranjang. Checkout menyimpan pesanan dan bukti pembayaran di Supabase Storage; penjual mengonfirmasi pembayaran dari menu **Pesanan**.
+Untuk project baru, terapkan **semua** file `.sql` di `supabase/migrations` melalui SQL Editor, satu per satu menurut urutan timestamp pada nama file; jangan melewati migration perantara. Pada project yang sudah berisi data, periksa dahulu migration mana yang sudah diterapkan agar tidak mengulang perubahan secara manual. Tiga migration paling baru adalah `20261118190000_finance_installments.sql`, `20261118193000_expand_monetary_range_and_sync_batch_prices.sql`, dan `20261118200000_qris_variants_and_order_receipt.sql`; semuanya bergantung pada schema dan fitur checkout sebelumnya. Migration terakhir menambahkan foto QRIS toko, konfirmasi penerimaan pesanan, validasi metode bayar di database, dan pemesanan beberapa varian. Migration finance memperluas nominal uang dan menyinkronkan harga produk ke batch yang masih terbuka. Produk tampil hanya jika toko terverifikasi, produknya aktif, dan produk dimasukkan ke batch terbuka. Foto produk di katalog berasal dari foto yang diunggah penjual. Checkout menyimpan pesanan dan bukti pembayaran di Supabase Storage.
 
 ## Edukasi mingguan
 
-Artikel terbaru disimpan di `education_articles` dan ditampilkan sesuai audience. Jika belum ada artikel tersinkronisasi atau Supabase belum tersedia, halaman tetap menampilkan panduan pilihan bawaan.
+Artikel RSS/Atom disimpan di `education_articles` dan ditampilkan sesuai audience. Halaman edukasi menampilkan minimal lima bacaan dengan memadukan artikel terbaru dan panduan pilihan bila artikel sinkron belum mencapai lima.
 
-Untuk mengaktifkan sinkronisasi:
+### Konfigurasi pembaruan mingguan
 
-1. Terapkan migration `20261116180000_automated_education.sql` ke project Supabase.
-2. Deploy Edge Function: `supabase functions deploy refresh-education`.
-3. Atur secret `EDUCATION_FEEDS` sebagai JSON array. Setiap feed harus memiliki URL HTTPS, host sumber yang sama, nama sumber, kategori, dan audience:
+1. Pastikan project Supabase yang benar sudah dipilih. Terapkan migration `20261116180000_automated_education.sql` melalui **SQL Editor** atau dengan Supabase CLI.
+2. Pada **Database → Extensions**, aktifkan `pg_cron` dan `pg_net` jika belum aktif.
+3. Hubungkan folder project ke Supabase CLI satu kali, lalu deploy fungsi. Ganti `PROJECT_REF_ANDA` dengan Project ID dari halaman **Project Settings → General**:
 
    ```sh
-   supabase secrets set EDUCATION_FEEDS='[{"url":"https://www.sba.gov/feed/","host":"www.sba.gov","sourceName":"U.S. Small Business Administration","category":"Usaha","audience":["seller"]}]'
+   npx supabase link --project-ref PROJECT_REF_ANDA
+   npx supabase functions deploy refresh-education
    ```
 
-   Contoh tersebut mengaktifkan artikel untuk penjual. Tambahkan feed RSS/Atom resmi dan tepercaya yang sudah diverifikasi untuk audience `buyer` agar artikel pembeli ikut diperbarui; jangan menebak URL feed. Satu sampai delapan feed dapat dikonfigurasi, dan kata kunci opsional dapat ditambahkan sebagai `"keywords":["usaha","pembayaran"]`.
-4. Simpan `project_url` dan `service_role_key` di Supabase Vault (jangan menaruh service-role key di aplikasi atau repository):
+4. Di **Edge Functions → Secrets**, tambahkan secret bernama `EDUCATION_FEEDS`. Nilainya harus berupa JSON array. Setiap feed harus RSS/Atom HTTPS resmi, dengan host yang sama seperti di URL, nama sumber, kategori, dan audience `buyer` dan/atau `seller`. Ganti seluruh contoh di bawah dengan feed yang sudah dipastikan benar-benar tersedia:
+
+   ```json
+   [{"url":"https://rss.domain-yang-diverifikasi/feed.xml","host":"rss.domain-yang-diverifikasi","sourceName":"Nama penerbit","category":"Edukasi","audience":["buyer"]}]
+   ```
+
+   Contoh ini hanya menunjukkan bentuk JSON, bukan alamat feed yang siap dipakai. Tambahkan feed terverifikasi untuk kedua audience bila diperlukan. Maksimal delapan feed; setiap feed menyumbang sampai delapan artikel berusia paling lama 120 hari. Agar berita otomatis saja berjumlah lima, sumber harus menyediakan setidaknya lima artikel terbaru yang memenuhi filter. Kata kunci opsional dapat ditambahkan sebagai `"keywords":["usaha","pembayaran"]`.
+5. Di **Database → Vault**, buat dua secret dengan nama persis `project_url` dan `service_role_key`. Isi `project_url` dengan URL project, misalnya `https://PROJECT_REF_ANDA.supabase.co`, dan `service_role_key` dengan secret key server dari pengaturan API project. Jangan menaruh service-role key pada aplikasi atau repository.
+
+6. Tempel isi `supabase/education-weekly-schedule.sql` ke **SQL Editor** lalu jalankan. Jadwalnya setiap Senin pukul 02:00 UTC (09:00 WIB); SQL ini memerlukan secret Vault pada langkah sebelumnya.
+7. Periksa job di SQL Editor:
 
    ```sql
-   select vault.create_secret('https://<project-ref>.supabase.co', 'project_url');
-   select vault.create_secret('<service-role-key>', 'service_role_key');
+   select jobname, schedule, active
+   from cron.job
+   where jobname = 'refresh-education-weekly';
    ```
 
-5. Jalankan isi `supabase/education-weekly-schedule.sql` di Supabase SQL Editor. Job akan berjalan setiap Senin pukul 02:00 UTC (09:00 WIB). File itu hanya berisi SQL penjadwalan; jangan tempel kode TypeScript Edge Function ke SQL Editor.
-
-Sinkronisasi dibatasi pada artikel berusia paling lama 120 hari dan maksimal delapan artikel per feed. Untuk mengubah sumber, perbarui secret `EDUCATION_FEEDS`; untuk mengubah jadwal, sesuaikan file SQL dan jalankan ulang.
+   Setelah jadwal berjalan, pantau hasilnya melalui **Edge Functions → refresh-education → Logs**. Untuk mengubah sumber, perbarui secret `EDUCATION_FEEDS`; untuk mengubah jadwal, sesuaikan file SQL dan jalankan ulang. Jangan tempel kode TypeScript Edge Function ke SQL Editor.
 
 ## Stack
 

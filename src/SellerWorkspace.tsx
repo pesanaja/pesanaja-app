@@ -7,6 +7,7 @@ import {
 import SellerOrders from './SellerOrders'
 import { supabase } from './lib/supabase'
 import { getOwnedProfileImagePath, removeProfileImage, uploadProfileImage, validateProfileImage } from './lib/profileImages'
+import { isValidPersonName, normalizePersonName } from './lib/nameValidation'
 import Education from './Education'
 
 type Product = {
@@ -23,7 +24,7 @@ type Product = {
 }
 type Batch = { id: string; name: string; status: string; closes_at: string | null }
 type BatchProduct = { batch_id: string; product_id: string; price: number; stock_limit: number | null }
-type OrderItem = { product_id: string; product_name: string; variant: string | null; quantity: number; line_total: number }
+type OrderItem = { product_id: string; product_name: string; variant: string | null; quantity: number; line_total: number; unit_cost: number }
 type Order = {
   id: string
   batch_id: string
@@ -35,17 +36,30 @@ type Order = {
   buyer: { full_name: string | null } | null
   order_items: OrderItem[]
 }
-type Payment = { id: string; method: string | null; status: string; amount: number; created_at: string; order: { order_number: string } | null }
+type Payment = { id: string; method: string | null; status: string; amount: number; created_at: string; installment_number: number | null; due_at: string | null; order: { order_number: string; status: string } | null }
+type OperatingExpense = { id: string; description: string; amount: number; occurred_on: string }
 type ProductForm = { name: string; category: string; description: string; price: string; cost: string; stock: string }
 
 const money = (value: number) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(value)
+const maxSafeMoney = Number.MAX_SAFE_INTEGER
+const productSaveErrorMessage = (message: string) => /out of range for type integer/i.test(message)
+  ? 'Harga melebihi batas database lama. Terapkan migration 20261118193000_expand_monetary_range_and_sync_batch_prices.sql di Supabase, lalu coba lagi.'
+  : `Produk gagal disimpan: ${message}`
 const productCategories = ['Makanan Berat & Bento', 'Kue dan Roti', 'Minuman', 'Lainnya']
 const statusName = (status: string) => ({
-  paid: 'Dibayar', completed: 'Selesai', unpaid: 'Belum bayar', ordered: 'Menunggu pembayaran',
+  paid: 'Dibayar', completed: 'Dibayar', unpaid: 'Belum bayar', ordered: 'Belum bayar',
   installment: 'Dicicil', cancelled: 'Dibatalkan',
 }[status] ?? status)
+const transactionStatus = (orderStatus: string | undefined, paymentStatus: string) => {
+  if (orderStatus === 'cancelled' || orderStatus === 'installment') return orderStatus
+  return paymentStatus === 'paid' ? 'paid' : 'unpaid'
+}
 const methodName = (method: string | null) => ({ qris: 'QRIS', transfer: 'Transfer', cash: 'Tunai' }[method ?? ''] ?? 'Belum dipilih')
-type SellerProfileForm = { storeName: string; ownerName: string; phone: string; description: string; pickupLocation: string; paymentDetails: string; logoUrl: string | null }
+const localDateInput = () => {
+  const date = new Date()
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+type SellerProfileForm = { storeName: string; ownerName: string; phone: string; description: string; pickupLocation: string; paymentDetails: string; logoUrl: string | null; qrisImagePath: string | null }
 
 export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreNameChange }: { userId: string; storeName: string; onSignOut: () => void; onStoreNameChange: (name: string) => void }) {
   const [active, setActive] = useState('Ringkasan')
@@ -54,10 +68,11 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
   const [batchProducts, setBatchProducts] = useState<BatchProduct[]>([])
   const [orders, setOrders] = useState<Order[]>([])
   const [payments, setPayments] = useState<Payment[]>([])
+  const [operatingExpenses, setOperatingExpenses] = useState<OperatingExpense[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
-  const [showProfile, setShowProfile] = useState(false)
+  const [profilePopoverAnchor, setProfilePopoverAnchor] = useState<'workspace' | 'topbar' | null>(null)
   const [showProductForm, setShowProductForm] = useState(false)
   const [showBatchForm, setShowBatchForm] = useState(false)
   const [viewProduct, setViewProduct] = useState<Product | null>(null)
@@ -65,10 +80,13 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
   const [editingProduct, setEditingProduct] = useState<Product | null>(null)
   const [editingBatch, setEditingBatch] = useState<Batch | null>(null)
   const [verificationStatus, setVerificationStatus] = useState<string | null>(null)
-  const [sellerProfile, setSellerProfile] = useState<SellerProfileForm>({ storeName, ownerName: '', phone: '', description: '', pickupLocation: '', paymentDetails: '', logoUrl: null })
+  const [sellerProfile, setSellerProfile] = useState<SellerProfileForm>({ storeName, ownerName: '', phone: '', description: '', pickupLocation: '', paymentDetails: '', logoUrl: null, qrisImagePath: null })
   const [sellerNim, setSellerNim] = useState('')
   const [logoFile, setLogoFile] = useState<File | null>(null)
   const [logoPreview, setLogoPreview] = useState('')
+  const [qrisFile, setQrisFile] = useState<File | null>(null)
+  const [qrisPreview, setQrisPreview] = useState('')
+  const [removeQrisImage, setRemoveQrisImage] = useState(false)
   const [profileEmail, setProfileEmail] = useState('')
   const [profileSaving, setProfileSaving] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -80,6 +98,8 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
   const [batchClosesAt, setBatchClosesAt] = useState('')
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([])
   const [productImagePreview, setProductImagePreview] = useState('')
+  const [expenseForm, setExpenseForm] = useState({ description: '', amount: '', occurredOn: localDateInput() })
+  const [expenseSaving, setExpenseSaving] = useState(false)
 
   useEffect(() => {
     if (!logoFile) {
@@ -90,6 +110,16 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
     setLogoPreview(previewUrl)
     return () => URL.revokeObjectURL(previewUrl)
   }, [logoFile])
+
+  useEffect(() => {
+    if (!qrisFile) {
+      setQrisPreview('')
+      return
+    }
+    const previewUrl = URL.createObjectURL(qrisFile)
+    setQrisPreview(previewUrl)
+    return () => URL.revokeObjectURL(previewUrl)
+  }, [qrisFile])
 
   useEffect(() => {
     if (!productImage) {
@@ -109,18 +139,19 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
     }
     setLoading(true)
     setError('')
-    const [productsResult, batchesResult, batchProductsResult, ordersResult, paymentsResult, sellerResult, profileResult, identityResult, authResult] = await Promise.all([
+    const [productsResult, batchesResult, batchProductsResult, ordersResult, paymentsResult, expensesResult, sellerResult, profileResult, identityResult, authResult] = await Promise.all([
       supabase.from('products').select('id,name,category,variants,description,image_url,price,cost_price,stock,is_active').eq('store_id', userId).order('created_at', { ascending: false }),
       supabase.from('preorder_batches').select('id,name,status,closes_at').eq('store_id', userId).order('created_at', { ascending: false }),
       supabase.from('batch_products').select('batch_id,product_id,price,stock_limit,batch:preorder_batches!inner(store_id)').eq('batch.store_id', userId),
-      supabase.from('orders').select('id,batch_id,order_number,status,subtotal,total,created_at,buyer:profiles!orders_buyer_id_fkey(full_name),order_items(product_id,product_name,variant,quantity,line_total)').eq('store_id', userId).order('created_at', { ascending: false }),
-      supabase.from('payments').select('id,method,status,amount,created_at,order:orders!inner(order_number,store_id)').eq('order.store_id', userId).order('created_at', { ascending: false }),
-      supabase.from('seller_profiles').select('store_name,description,pickup_location,payment_details,logo_url,verification_status').eq('user_id', userId).maybeSingle(),
+      supabase.from('orders').select('id,batch_id,order_number,status,subtotal,total,created_at,buyer:profiles!orders_buyer_id_fkey(full_name),order_items(product_id,product_name,variant,quantity,line_total,unit_cost)').eq('store_id', userId).order('created_at', { ascending: false }),
+      supabase.from('payments').select('id,method,status,amount,created_at,installment_number,due_at,order:orders!inner(order_number,status,store_id)').eq('order.store_id', userId).order('created_at', { ascending: false }),
+      supabase.from('operating_expenses').select('id,description,amount,occurred_on').eq('store_id', userId).order('occurred_on', { ascending: false }),
+      supabase.from('seller_profiles').select('store_name,description,pickup_location,payment_details,qris_image_path,logo_url,verification_status').eq('user_id', userId).maybeSingle(),
       supabase.from('profiles').select('full_name,phone').eq('id', userId).maybeSingle(),
       supabase.from('seller_identities').select('nim').eq('user_id', userId).maybeSingle(),
-      supabase.auth.getUser(),
+      supabase.auth.getSession(),
     ])
-    const errors = [productsResult.error, batchesResult.error, batchProductsResult.error, ordersResult.error, paymentsResult.error, sellerResult.error, profileResult.error, identityResult.error].filter(Boolean)
+    const errors = [productsResult.error, batchesResult.error, batchProductsResult.error, ordersResult.error, paymentsResult.error, expensesResult.error, sellerResult.error, profileResult.error, identityResult.error].filter(Boolean)
     if (productsResult.error) setProducts([])
     else setProducts((productsResult.data ?? []) as Product[])
     if (batchesResult.error) setBatches([])
@@ -131,6 +162,8 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
     else setOrders((ordersResult.data ?? []) as unknown as Order[])
     if (paymentsResult.error) setPayments([])
     else setPayments((paymentsResult.data ?? []) as unknown as Payment[])
+    if (expensesResult.error) setOperatingExpenses([])
+    else setOperatingExpenses((expensesResult.data ?? []) as OperatingExpense[])
     if (sellerResult.error) setVerificationStatus(null)
     else setVerificationStatus(sellerResult.data?.verification_status ?? null)
     if (profileResult.error) setError(`Profil usaha gagal dimuat: ${profileResult.error.message}`)
@@ -141,6 +174,7 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
       pickupLocation: sellerResult.data?.pickup_location ?? '',
       paymentDetails: sellerResult.data?.payment_details ?? '',
       logoUrl: sellerResult.data?.logo_url ?? null,
+      qrisImagePath: sellerResult.data?.qris_image_path ?? null,
       ownerName: profileResult.data?.full_name ?? '',
       phone: profileResult.data?.phone ?? '',
     }))
@@ -148,7 +182,7 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
     else setSellerNim(identityResult.data?.nim ?? '')
     if (authResult.error) setError(`Informasi akun gagal dimuat: ${authResult.error.message}`)
     else {
-      setProfileEmail(authResult.data.user?.email ?? '')
+      setProfileEmail(authResult.data.session?.user.email ?? '')
       setVerificationStatus(sellerResult.data?.verification_status ?? null)
     }
     if (errors.length) setError(`Sebagian data dashboard gagal dimuat: ${errors.map(item => item?.message).join(' · ')}`)
@@ -163,10 +197,16 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
       setError('Koneksi Supabase belum tersedia.')
       return
     }
+    const ownerName = normalizePersonName(sellerProfile.ownerName)
+    if (!isValidPersonName(ownerName)) {
+      setError('Nama pemilik harus berisi huruf dan hanya boleh memakai spasi, tanda hubung, atau apostrof.')
+      return
+    }
     setError('')
     setNotice('')
     setProfileSaving(true)
     let uploadedPath: string | null = null
+    let uploadedQrisPath: string | null = null
     try {
       let logoUrl = sellerProfile.logoUrl
       if (logoFile) {
@@ -174,9 +214,17 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
         uploadedPath = uploaded.path
         logoUrl = uploaded.url
       }
+      let qrisImagePath = removeQrisImage ? null : sellerProfile.qrisImagePath
+      if (qrisFile) {
+        const extension = qrisFile.type === 'image/png' ? 'png' : qrisFile.type === 'image/webp' ? 'webp' : 'jpg'
+        uploadedQrisPath = `${userId}/${crypto.randomUUID()}.${extension}`
+        const { error: qrisUploadError } = await supabase.storage.from('seller-qris').upload(uploadedQrisPath, qrisFile, { contentType: qrisFile.type, upsert: false })
+        if (qrisUploadError) throw new Error(`Foto QRIS gagal diunggah: ${qrisUploadError.message}`)
+        qrisImagePath = uploadedQrisPath
+      }
       const { error: ownerError } = await supabase.from('profiles').upsert({
         id: userId,
-        full_name: sellerProfile.ownerName.trim(),
+        full_name: ownerName,
         phone: sellerProfile.phone.trim() || null,
       }, { onConflict: 'id' })
       if (ownerError) throw new Error(`Informasi pemilik gagal disimpan: ${ownerError.message}`)
@@ -185,23 +233,35 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
         description: sellerProfile.description.trim() || null,
         pickup_location: sellerProfile.pickupLocation.trim() || null,
         payment_details: sellerProfile.paymentDetails.trim() || null,
+        qris_image_path: qrisImagePath,
         logo_url: logoUrl,
       }).eq('user_id', userId)
       if (storeError) throw new Error(`Informasi toko gagal disimpan: ${storeError.message}`)
       const oldPath = logoFile ? getOwnedProfileImagePath(sellerProfile.logoUrl, userId) : null
-      setSellerProfile(current => ({ ...current, logoUrl }))
+      const oldQrisPath = qrisFile || removeQrisImage ? sellerProfile.qrisImagePath : null
+      setSellerProfile(current => ({ ...current, logoUrl, qrisImagePath }))
       setLogoFile(null)
+      setQrisFile(null)
+      setRemoveQrisImage(false)
       onStoreNameChange(sellerProfile.storeName.trim())
       setNotice('Profil toko berhasil diperbarui.')
       if (oldPath) {
         try { await removeProfileImage(oldPath) }
         catch (cleanupError) { setNotice(`Profil tersimpan, tetapi foto lama gagal dihapus: ${cleanupError instanceof Error ? cleanupError.message : 'Terjadi kesalahan.'}`) }
       }
+      if (oldQrisPath && oldQrisPath !== qrisImagePath) {
+        const { error: cleanupError } = await supabase.storage.from('seller-qris').remove([oldQrisPath])
+        if (cleanupError) setNotice(`Profil tersimpan, tetapi foto QRIS lama gagal dihapus: ${cleanupError.message}`)
+      }
     } catch (cause) {
       let message = cause instanceof Error ? cause.message : 'Profil toko gagal disimpan.'
       if (uploadedPath) {
         try { await removeProfileImage(uploadedPath) }
         catch (cleanupError) { message = `${message}. ${cleanupError instanceof Error ? cleanupError.message : 'Foto baru gagal dibersihkan.'}` }
+      }
+      if (uploadedQrisPath) {
+        const { error: cleanupError } = await supabase.storage.from('seller-qris').remove([uploadedQrisPath])
+        if (cleanupError) message = `${message}. Foto QRIS baru gagal dibersihkan: ${cleanupError.message}`
       }
       setError(message)
     } finally {
@@ -224,6 +284,16 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
   const activeBatches = batches.filter(batch => batch.status === 'open' && (!batch.closes_at || new Date(batch.closes_at) > new Date()))
   const paidOrders = orders.filter(order => order.status === 'paid' || order.status === 'completed')
   const revenue = paidOrders.reduce((sum, order) => sum + order.total, 0)
+  const receivedPaymentTotal = payments.filter(payment => payment.status === 'paid').reduce((sum, payment) => sum + payment.amount, 0)
+  const productCosts = paidOrders.reduce((sum, order) => sum + order.order_items.reduce((itemSum, item) => itemSum + item.unit_cost * item.quantity, 0), 0)
+  const expenseTotal = operatingExpenses.reduce((sum, expense) => sum + expense.amount, 0)
+  const netProfit = revenue - productCosts - expenseTotal
+  const orderStatusCounts = {
+    unpaid: orders.filter(order => ['ordered', 'unpaid'].includes(order.status)).length,
+    cancelled: orders.filter(order => order.status === 'cancelled').length,
+    paid: paidOrders.length,
+    installment: orders.filter(order => order.status === 'installment').length,
+  }
   const outstandingOrders = orders.filter(order => ['ordered', 'unpaid', 'installment'].includes(order.status)).length
   const soldCount = paidOrders.reduce((sum, order) => sum + order.order_items.reduce((sub, item) => sub + item.quantity, 0), 0)
   const visibleProducts = products.filter(product => `${product.name} ${product.category ?? ''}`.toLowerCase().includes(search.toLowerCase()))
@@ -246,9 +316,57 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
   const maxDailyRevenue = Math.max(1, ...dailyRevenue.map(day => day.total))
   const notify = (value: string) => { setNotice(value); window.setTimeout(() => setNotice(''), 3000) }
 
+  async function saveOperatingExpense(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!supabase) {
+      setError('Koneksi Supabase belum tersedia.')
+      return
+    }
+    const amount = Number(expenseForm.amount)
+    if (!expenseForm.description.trim() || !Number.isSafeInteger(amount) || amount <= 0) {
+      setError('Isi keterangan dan jumlah biaya yang valid.')
+      return
+    }
+    setExpenseSaving(true)
+    setError('')
+    const { error: expenseError } = await supabase.from('operating_expenses').insert({
+      store_id: userId,
+      description: expenseForm.description.trim(),
+      amount,
+      occurred_on: expenseForm.occurredOn,
+    })
+    if (expenseError) setError(`Biaya operasional gagal disimpan: ${expenseError.message}`)
+    else {
+      setExpenseForm({ description: '', amount: '', occurredOn: localDateInput() })
+      notify('Biaya operasional berhasil dicatat.')
+      await loadData()
+    }
+    setExpenseSaving(false)
+  }
+
   async function saveProduct(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!supabase) return
+    const name = productForm.name.trim()
+    const price = Number(productForm.price)
+    const costPrice = Number(productForm.cost || 0)
+    const stock = productForm.stock === '' ? null : Number(productForm.stock)
+    if (!name) {
+      setError('Nama produk wajib diisi dan tidak boleh hanya berisi spasi.')
+      return
+    }
+    if (!Number.isSafeInteger(price) || price <= 0 || price > maxSafeMoney) {
+      setError('Harga jual harus berupa bilangan bulat lebih dari Rp0.')
+      return
+    }
+    if (!Number.isSafeInteger(costPrice) || costPrice < 0 || costPrice > maxSafeMoney) {
+      setError('Modal harus berupa bilangan bulat Rp0 atau lebih.')
+      return
+    }
+    if (stock !== null && (!Number.isSafeInteger(stock) || stock < 0)) {
+      setError('Stok harus berupa bilangan bulat nol atau lebih.')
+      return
+    }
     setSaving(true)
     setError('')
     const variants = [...new Set(productVariants.map(variant => variant.trim()).filter(Boolean))]
@@ -274,13 +392,13 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
     }
     const productValues = {
       store_id: userId,
-      name: productForm.name.trim(),
+      name,
       category: productForm.category || null,
       variants,
       description: productForm.description.trim() || null,
-      price: Number(productForm.price),
-      cost_price: Number(productForm.cost || 0),
-      stock: productForm.stock === '' ? null : Number(productForm.stock),
+      price,
+      cost_price: costPrice,
+      stock,
       is_active: true,
     }
     const saveResult = editingProduct
@@ -291,9 +409,9 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
       if (imagePath) {
         const { error: cleanupError } = await supabase.storage.from('product-images').remove([imagePath])
         setError(cleanupError
-          ? `Produk gagal disimpan: ${saveError.message}. Foto juga gagal dibersihkan: ${cleanupError.message}`
-          : `Produk gagal disimpan: ${saveError.message}`)
-      } else setError(`Produk gagal disimpan: ${saveError.message}`)
+          ? `${productSaveErrorMessage(saveError.message)}. Foto juga gagal dibersihkan: ${cleanupError.message}`
+          : productSaveErrorMessage(saveError.message))
+      } else setError(productSaveErrorMessage(saveError.message))
     } else {
       setProductForm({ name: '', category: '', description: '', price: '', cost: '', stock: '' })
       setProductVariants([])
@@ -390,14 +508,16 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
     setError('')
   }
 
+  const accountPopover = <div className="profile-popover"><b>{storeName}</b><span>Seller workspace</span><button className="profile-signout" onClick={onSignOut}><LogOut size={14}/> Keluar</button></div>
+
   return <div className="app-shell">
     <aside className="sidebar">
       <a className="brand" href="#home" onClick={() => setActive('Ringkasan')}><picture className="brand-art"><source media="(max-width: 850px)" srcSet="/assets/pesanaja-icon.svg"/><img src="/assets/pesanaja-logo.svg" alt="PesanAja"/></picture></a>
-      <button className="workspace-switch" onClick={() => setShowProfile(value => !value)}><span className="shop-avatar">{sellerProfile.logoUrl ? <img src={sellerProfile.logoUrl} alt=""/> : storeName.slice(0, 1).toUpperCase()}</span><span className="workspace-text"><b>{storeName}</b><small>Dashboard Penjual</small></span><ChevronDown size={15} className="muted"/></button>
+      <div className="workspace-switch-wrap"><button className="workspace-switch" onClick={() => setProfilePopoverAnchor(value => value === 'workspace' ? null : 'workspace')}><span className="shop-avatar">{sellerProfile.logoUrl ? <img src={sellerProfile.logoUrl} alt=""/> : storeName.slice(0, 1).toUpperCase()}</span><span className="workspace-text"><b>{storeName}</b><small>Dashboard Penjual</small></span><ChevronDown size={15} className="muted"/></button>{profilePopoverAnchor === 'workspace' && accountPopover}</div>
       <div className="menu-label">WORKSPACE</div>
       <nav className="main-nav">
         <NavItem icon={<LayoutDashboard/>} label="Ringkasan" active={active} onClick={setActive}/>
-        <NavItem icon={<ShoppingCart/>} label="Pesanan" badge={orders.length ? String(orders.length) : undefined} active={active} onClick={setActive}/>
+        <NavItem icon={<ShoppingCart/>} label="Riwayat pelanggan" badge={orders.length ? String(orders.length) : undefined} active={active} onClick={setActive}/>
         <NavItem icon={<Package/>} label="Produk" active={active} onClick={setActive}/>
         <NavItem icon={<Clock3/>} label="Batch pre-order" active={active} onClick={setActive}/>
         <NavItem icon={<Wallet/>} label="Keuangan" active={active} onClick={setActive}/>
@@ -406,14 +526,13 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
       <nav className="main-nav"><NavItem icon={<BookOpen/>} label="Belajar jualan" active={active} onClick={setActive}/><NavItem icon={<CircleHelp/>} label="Pusat bantuan" active={active} onClick={setActive}/></nav>
       <div className="sidebar-bottom">
         <div className="seller-tip"><div className="tip-icon"><Sparkles size={16}/></div><b>Jualan makin rapi</b><p>Kelola produk, batch, dan pesanan dari satu tempat.</p><button onClick={() => setActive('Produk')}>Kelola produk <ArrowRight size={14}/></button><span className="tip-orb"/></div>
-        <button className="nav-item setting-item" onClick={() => notify('Pengaturan akan segera tersedia')}><Settings size={18}/><span>Pengaturan</span></button>
-        <button className={`profile-row ${active === 'Profil toko' ? 'active' : ''}`} onClick={() => { setActive('Profil toko'); setShowProfile(false) }}><span className="profile-pic">{sellerProfile.logoUrl ? <img src={sellerProfile.logoUrl} alt=""/> : storeName.slice(0, 1).toUpperCase()}</span><span className="profile-copy"><b>{storeName}</b><small>Profil toko <ShieldCheck size={12}/></small></span><Ellipsis size={18} className="muted"/></button>
+        <button className="nav-item setting-item" disabled title="Pengaturan belum tersedia"><Settings size={18}/><span>Pengaturan</span></button>
+        <button className={`profile-row ${active === 'Profil toko' ? 'active' : ''}`} onClick={() => { setActive('Profil toko'); setProfilePopoverAnchor(null) }}><span className="profile-pic">{sellerProfile.logoUrl ? <img src={sellerProfile.logoUrl} alt=""/> : storeName.slice(0, 1).toUpperCase()}</span><span className="profile-copy"><b>{storeName}</b><small>Profil toko <ShieldCheck size={12}/></small></span><Ellipsis size={18} className="muted"/></button>
       </div>
-      {showProfile && <div className="profile-popover"><b>{storeName}</b><span>Seller workspace</span><button className="profile-signout" onClick={onSignOut}><LogOut size={14}/> Keluar</button></div>}
     </aside>
 
     <main className="main-area">
-      <header className="topbar"><div className="breadcrumbs"><span>Workspace</span><b>/</b><strong>{active}</strong></div><div className="top-actions"><button className="icon-button help-button" aria-label="Pusat bantuan" onClick={() => notify('Pusat bantuan siap membantu')}><CircleHelp size={18}/></button><span className="top-divider"/><button className="seller-chip" onClick={() => setShowProfile(value => !value)}><span className="online-dot"/>Mode penjual<ChevronDown size={14}/></button></div></header>
+      <header className="topbar"><div className="breadcrumbs"><span>Workspace</span><b>/</b><strong>{active}</strong></div><div className="top-actions"><button className="icon-button help-button" aria-label="Pusat bantuan" onClick={() => setActive('Pusat bantuan')}><CircleHelp size={18}/></button><span className="top-divider"/><div className="seller-account-menu"><button className="seller-chip" onClick={() => setProfilePopoverAnchor(value => value === 'topbar' ? null : 'topbar')}><span className="online-dot"/>Mode penjual<ChevronDown size={14}/></button>{profilePopoverAnchor === 'topbar' && accountPopover}</div></div></header>
       {error && !showProductForm && !showBatchForm && active !== 'Profil toko' && <p className="workspace-message error" role="alert">{error}</p>}
       {notice && <p className="workspace-message success" role="status">{notice}</p>}
       {active === 'Profil toko' ? <section className="workspace-page seller-profile-page">
@@ -441,12 +560,26 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
             <label>Nomor WhatsApp<div className="seller-profile-input-icon"><Phone size={16}/><input type="tel" required maxLength={30} autoComplete="tel" value={sellerProfile.phone} onChange={event => setSellerProfile(current => ({ ...current, phone: event.target.value }))} placeholder="08xxxxxxxxxx"/></div></label>
             <label className="seller-profile-wide">Deskripsi toko<textarea rows={4} maxLength={1000} value={sellerProfile.description} onChange={event => setSellerProfile(current => ({ ...current, description: event.target.value }))} placeholder="Ceritakan produk dan keunikan tokomu…"/></label>
             <label>Lokasi pengambilan<div className="seller-profile-input-icon"><MapPin size={16}/><input maxLength={240} value={sellerProfile.pickupLocation} onChange={event => setSellerProfile(current => ({ ...current, pickupLocation: event.target.value }))} placeholder="Lokasi serah terima"/></div></label>
-            <label>Informasi pembayaran<div className="seller-profile-input-icon"><CreditCard size={16}/><input maxLength={240} value={sellerProfile.paymentDetails} onChange={event => setSellerProfile(current => ({ ...current, paymentDetails: event.target.value }))} placeholder="Rekening atau e-wallet"/></div></label>
+            <label>Informasi rekening / e-wallet<div className="seller-profile-input-icon"><CreditCard size={16}/><input maxLength={240} value={sellerProfile.paymentDetails} onChange={event => setSellerProfile(current => ({ ...current, paymentDetails: event.target.value }))} placeholder="Contoh: BCA 123456789 a.n. Nama"/></div></label>
+            <div className="seller-qris-editor seller-profile-wide">
+              <span className="seller-qris-preview">{qrisPreview ? <img src={qrisPreview} alt="Pratinjau QRIS"/> : sellerProfile.qrisImagePath && supabase && !removeQrisImage ? <img src={supabase.storage.from('seller-qris').getPublicUrl(sellerProfile.qrisImagePath).data.publicUrl} alt="QRIS toko"/> : <CreditCard size={25}/>}</span>
+              <div><b>QRIS toko</b><small>PNG, JPG, atau WEBP · Maks. 5 MB</small><label className="seller-logo-upload" htmlFor="seller-qris-image"><Camera size={15}/>{qrisFile ? 'Ganti QRIS' : 'Pilih foto QRIS'}</label><input id="seller-qris-image" className="profile-file-input" type="file" accept="image/png,image/jpeg,image/webp" onChange={event => {
+                const file = event.target.files?.[0] ?? null
+                if (file) {
+                  const validationError = validateProfileImage(file)
+                  if (validationError) { setError(validationError); event.target.value = ''; return }
+                }
+                setError('')
+                setRemoveQrisImage(false)
+                setQrisFile(file)
+                event.target.value = ''
+              }}/>{(qrisFile || sellerProfile.qrisImagePath) && <button className="seller-qris-remove" type="button" onClick={() => { setQrisFile(null); setRemoveQrisImage(true) }}>Hapus QRIS</button>}</div>
+            </div>
           </div>
           {error && <p className="workspace-message error" role="alert">{error}</p>}
-          <div className="seller-profile-form-footer"><span>Perubahan langsung tersimpan untuk profil tokomu.</span><button className="primary-button" disabled={profileSaving}><Save size={16}/>{profileSaving ? 'Menyimpan…' : 'Simpan profil'}</button></div>
+          <div className="seller-profile-form-footer"><span>Perubahan tersimpan setelah kamu memilih Simpan profil.</span><button className="primary-button" disabled={profileSaving}><Save size={16}/>{profileSaving ? 'Menyimpan…' : 'Simpan profil'}</button></div>
         </form>
-      </section> : active === 'Belajar jualan' ? <section className="workspace-page"><Education role="seller"/></section> : active === 'Pesanan' ? <SellerOrders storeId={userId}/> : active === 'Produk' ? <section className="workspace-page">
+      </section> : active === 'Belajar jualan' ? <section className="workspace-page"><Education role="seller"/></section> : active === 'Riwayat pelanggan' ? <SellerOrders storeId={userId}/> : active === 'Produk' ? <section className="workspace-page">
         <PageHeading eyebrow="KATALOG TOKO" title="Produk" description="Kelola produk yang tersedia di tokomu." action={<button className="primary-button" onClick={() => openProductForm()}><Plus size={17}/> Tambah produk</button>}/>
         <label className="workspace-search"><Search size={16}/><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Cari produk"/></label>
         {loading ? <EmptyState text="Memuat produk…"/> : visibleProducts.length ? <div className="workspace-product-list">{visibleProducts.map(product => <ProductRow key={product.id} product={product} sold={soldByProduct.get(product.id) ?? 0} onToggle={() => void toggleProduct(product)} onView={() => setViewProduct(product)} onEdit={() => openProductForm(product)}/>)}</div> : <EmptyState text={search ? 'Produk tidak ditemukan.' : 'Belum ada produk. Tambahkan produk pertamamu untuk mulai berjualan.'}/>}
@@ -455,9 +588,12 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
         {loading ? <EmptyState text="Memuat batch…"/> : batches.length ? <div className="workspace-batch-list">{batches.map(batch => <article className="workspace-batch-card" key={batch.id}><div><span className={`workspace-batch-status ${batch.status}`}>{batch.status === 'open' ? 'Dibuka' : batch.status === 'draft' ? 'Draft' : batch.status}</span><h2>{batch.name}</h2><p>{batchProducts.filter(item => item.batch_id === batch.id).length} produk · {batch.closes_at ? `Tutup ${new Date(batch.closes_at).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}` : 'Tanpa batas waktu'}</p></div><span>{orders.filter(order => order.batch_id === batch.id).length} pesanan</span><div className="workspace-row-actions"><button className="secondary-button" onClick={() => void viewBatchProducts(batch)}><Eye size={15}/> Lihat</button>{['open', 'draft'].includes(batch.status) && <button className="secondary-button" onClick={() => openBatchForm(batch)}><Pencil size={15}/> Edit</button>}</div></article>)}</div> : <EmptyState text="Belum ada batch. Buat batch untuk menampilkan produk di halaman belanja."/>}
       </section> : active === 'Keuangan' ? <section className="workspace-page">
         <PageHeading eyebrow="RINGKASAN TRANSAKSI" title="Keuangan" description="Pantau pembayaran pesanan di tokomu."/>
-        <div className="finance-total"><span>Total pembayaran terkonfirmasi</span><strong>{money(revenue)}</strong><small>{paidOrders.length} pesanan dibayar</small></div>
-        {loading ? <EmptyState text="Memuat transaksi…"/> : payments.length ? <div className="workspace-table-wrap"><table className="workspace-table"><thead><tr><th>Pesanan</th><th>Tanggal</th><th>Metode</th><th>Jumlah</th><th>Status</th></tr></thead><tbody>{payments.map(payment => <tr key={payment.id}><td>{payment.order?.order_number ?? 'Pesanan'}</td><td>{new Date(payment.created_at).toLocaleDateString('id-ID')}</td><td>{methodName(payment.method)}</td><td>{money(payment.amount)}</td><td><span className={`seller-order-status ${payment.status === 'paid' ? 'paid' : ''}`}>{statusName(payment.status)}</span></td></tr>)}</tbody></table></div> : <EmptyState text="Belum ada transaksi. Pembayaran akan muncul setelah pembeli memesan."/>}
-      </section> : active === 'Pusat bantuan' ? <section className="workspace-page"><PageHeading eyebrow="PESANAJA" title={active} description="Panduan dan bantuan akan tersedia di sini."/><EmptyState text="Belum ada konten untuk ditampilkan."/></section> : <section className="workspace-page">
+        <div className="finance-total"><span>Total pembayaran diterima</span><strong>{money(receivedPaymentTotal)}</strong><small>Pembayaran penuh dan cicilan yang sudah dikonfirmasi</small></div>
+        {loading ? <EmptyState text="Memuat transaksi…"/> : payments.length ? <div className="workspace-table-wrap"><table className="workspace-table"><thead><tr><th>Pesanan</th><th>Tanggal</th><th>Metode</th><th>Jumlah</th><th>Status</th></tr></thead><tbody>{payments.map(payment => {
+          const status = transactionStatus(payment.order?.status, payment.status)
+          return <tr key={payment.id}><td>{payment.order?.order_number ?? 'Pesanan'}{payment.installment_number && <small className="payment-installment-label">{payment.installment_number === 1 ? 'Uang muka' : `Cicilan ${payment.installment_number} dari 3`}</small>}</td><td>{new Date(payment.created_at).toLocaleDateString('id-ID')}</td><td>{methodName(payment.method)}</td><td>{money(payment.amount)}</td><td><span className={`seller-order-status ${status}`}>{statusName(status)}</span></td></tr>
+        })}</tbody></table></div> : <EmptyState text="Belum ada transaksi. Pembayaran akan muncul setelah pembeli memesan."/>}
+      </section> : active === 'Pusat bantuan' ? <section className="workspace-page"><PageHeading eyebrow="PESANAJA" title={active} description="Konten pusat bantuan belum tersedia."/><EmptyState text="Panduan dan kontak bantuan akan ditambahkan di sini."/></section> : <section className="workspace-page">
         <div className="workspace-welcome"><div><div className="eyebrow"><span className="eyebrow-dot"/> {new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</div><h1>Selamat pagi, {storeName}</h1><p>Ringkasan berdasarkan data toko yang sudah kamu masukkan.</p></div><button className="primary-button" onClick={() => openBatchForm()} disabled={!products.some(product => product.is_active)}><Plus size={17}/> Buat batch baru</button></div>
         {verificationStatus && verificationStatus !== 'verified' && <div className="workspace-callout"><ShieldCheck size={22}/><div><b>Email penjual belum terkonfirmasi</b><span>Konfirmasi email @student.ub.ac.id yang dipakai untuk mendaftar. Setelah email terkonfirmasi dan NIM tersimpan, toko otomatis aktif. Produk juga harus aktif dan dimasukkan ke batch pre-order yang sedang dibuka agar terlihat oleh pembeli.</span></div></div>}
         {loading ? <EmptyState text="Memuat ringkasan toko…"/> : <>
@@ -468,6 +604,28 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
             <DataStat icon={<ShoppingBag size={19}/>} title="Pesanan masuk" value={String(orders.length)} foot="semua pesanan toko"/>
             <DataStat icon={<Clock3 size={19}/>} title="Perlu diproses" value={String(outstandingOrders)} foot="menunggu pembayaran"/>
             <DataStat icon={<Package size={19}/>} title="Produk terjual" value={String(soldCount)} foot={`${products.filter(product => product.is_active).length} produk aktif`}/>
+          </section>
+          <section className="panel profit-loss-panel">
+            <div className="panel-heading"><div><h3>Laporan Laba Rugi</h3><p>Akumulasi dari pesanan yang sudah dibayar penuh</p><small className="profit-loss-note">Modal pesanan lama memakai nilai modal produk saat migrasi.</small></div><strong className={netProfit < 0 ? 'profit-loss-negative' : 'profit-loss-positive'}>{money(netProfit)}</strong></div>
+            <div className="profit-loss-metrics">
+              <div><span>Omzet</span><strong>{money(revenue)}</strong></div>
+              <div><span>Modal produk terjual</span><strong>{money(productCosts)}</strong></div>
+              <div><span>Biaya operasional</span><strong>{money(expenseTotal)}</strong></div>
+              <div className={netProfit < 0 ? 'profit-loss-negative' : 'profit-loss-positive'}><span>Laba / rugi bersih</span><strong>{money(netProfit)}</strong></div>
+            </div>
+            <form className="expense-entry-form" onSubmit={saveOperatingExpense}>
+              <label>Keterangan<input required maxLength={160} value={expenseForm.description} onChange={event => setExpenseForm(current => ({ ...current, description: event.target.value }))} placeholder="Contoh: kemasan produk"/></label>
+              <label>Jumlah (Rp)<input required type="number" min="1" step="1" value={expenseForm.amount} onChange={event => setExpenseForm(current => ({ ...current, amount: event.target.value }))} placeholder="0"/></label>
+              <label>Tanggal<input required type="date" value={expenseForm.occurredOn} onChange={event => setExpenseForm(current => ({ ...current, occurredOn: event.target.value }))}/></label>
+              <button className="primary-button" type="submit" disabled={expenseSaving}>{expenseSaving ? 'Menyimpan…' : 'Catat biaya'}</button>
+            </form>
+            {operatingExpenses.length > 0 && <div className="expense-recent-list"><b>Biaya operasional terbaru</b>{operatingExpenses.slice(0, 5).map(expense => <div key={expense.id}><span>{expense.description}<small>{new Date(`${expense.occurred_on}T00:00:00`).toLocaleDateString('id-ID', { dateStyle: 'medium' })}</small></span><strong>{money(expense.amount)}</strong></div>)}</div>}
+          </section>
+          <section className="order-status-summary" aria-label="Ringkasan status pesanan">
+            <div className="unpaid"><span>Belum bayar</span><b>{orderStatusCounts.unpaid}</b></div>
+            <div className="cancelled"><span>Dibatalkan</span><b>{orderStatusCounts.cancelled}</b></div>
+            <div className="paid"><span>Dibayar</span><b>{orderStatusCounts.paid}</b></div>
+            <div className="installment"><span>Dicicil</span><b>{orderStatusCounts.installment}</b></div>
           </section>
           <section className="workspace-insights">
             <div className="panel workspace-chart"><div className="panel-heading"><div><h3>Penjualan 7 hari terakhir</h3><p>Hanya pembayaran yang sudah dikonfirmasi</p></div><strong>{money(dailyRevenue.reduce((sum, day) => sum + day.total, 0))}</strong></div><div className="workspace-bars">{dailyRevenue.map(day => <div key={day.date.toISOString()} title={`${day.date.toLocaleDateString('id-ID')}: ${money(day.total)}`}><span style={{ height: `${Math.max(4, day.total / maxDailyRevenue * 100)}%` }}/><small>{new Intl.DateTimeFormat('id-ID', { weekday: 'short' }).format(day.date)}</small></div>)}</div></div>
@@ -486,9 +644,9 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
     {showProductForm && <div className="modal-backdrop" onClick={closeProductForm}><form className="workspace-modal" onClick={event => event.stopPropagation()} onSubmit={saveProduct}><div className="workspace-modal-heading"><div><span>PRODUK TOKO</span><h2>{editingProduct ? 'Edit produk' : 'Tambah produk'}</h2></div><button type="button" className="icon-button" onClick={closeProductForm} aria-label="Tutup"><X size={18}/></button></div>
       {error && <p className="workspace-message error product-form-error" role="alert">{error}</p>}
       <label>Nama produk<input required maxLength={120} value={productForm.name} onChange={event => setProductForm(current => ({ ...current, name: event.target.value }))}/></label>
-      <div className="workspace-form-grid"><label>Kategori<select value={productForm.category} onChange={event => setProductForm(current => ({ ...current, category: event.target.value }))}><option value="">Pilih kategori</option>{productCategories.map(category => <option key={category} value={category}>{category}</option>)}</select></label><label>Harga jual (Rp)<input type="number" min="0" step="1" required value={productForm.price} onChange={event => setProductForm(current => ({ ...current, price: event.target.value }))}/></label></div>
+      <div className="workspace-form-grid"><label>Kategori<select value={productForm.category} onChange={event => setProductForm(current => ({ ...current, category: event.target.value }))}><option value="">Pilih kategori</option>{productCategories.map(category => <option key={category} value={category}>{category}</option>)}</select></label><label>Harga jual (Rp)<input type="number" min="1" max={maxSafeMoney} step="1" required value={productForm.price} onChange={event => setProductForm(current => ({ ...current, price: event.target.value }))}/></label></div>
       <fieldset className="product-variants-field"><legend>Varian produk <small>(opsional, contoh: Cokelat, Matcha)</small></legend>{productVariants.map((variant, index) => <div className="product-variant-row" key={index}><input aria-label={`Varian ${index + 1}`} maxLength={50} placeholder={`Nama varian ${index + 1}`} value={variant} onChange={event => setProductVariants(current => current.map((item, itemIndex) => itemIndex === index ? event.target.value : item))}/><button type="button" className="secondary-button" aria-label={`Hapus varian ${index + 1}`} onClick={() => setProductVariants(current => current.filter((_, itemIndex) => itemIndex !== index))}><X size={15}/></button></div>)}{productVariants.length < 20 && <button type="button" className="add-product-variant" onClick={() => setProductVariants(current => [...current, ''])}><Plus size={15}/> Tambah varian</button>}</fieldset>
-      <div className="workspace-form-grid"><label>Modal per produk (Rp)<input type="number" min="0" step="1" value={productForm.cost} onChange={event => setProductForm(current => ({ ...current, cost: event.target.value }))}/></label><label>Stok<input type="number" min="0" step="1" placeholder="Kosong = tanpa batas" value={productForm.stock} onChange={event => setProductForm(current => ({ ...current, stock: event.target.value }))}/></label></div>
+      <div className="workspace-form-grid"><label>Modal per produk (Rp)<input type="number" min="0" max={maxSafeMoney} step="1" value={productForm.cost} onChange={event => setProductForm(current => ({ ...current, cost: event.target.value }))}/></label><label>Stok<input type="number" min="0" step="1" placeholder="Kosong = tanpa batas" value={productForm.stock} onChange={event => setProductForm(current => ({ ...current, stock: event.target.value }))}/></label></div>
       <label className="product-image-field">Foto produk (opsional)<input type="file" accept="image/png,image/jpeg,image/webp" onChange={event => {
         const file = event.target.files?.[0] ?? null
         if (file && !['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
-  ArrowLeft, ArrowUpRight, BadgeCheck, BookOpenCheck, Camera,
+  ArrowLeft, ArrowUpRight, BadgeCheck, BookOpenCheck, Camera, ClipboardList,
   CircleDollarSign, CreditCard, Lightbulb, PackageCheck, ShoppingBag, UsersRound,
 } from 'lucide-react'
 import { supabase } from './lib/supabase'
@@ -78,6 +78,42 @@ const articles: Record<EducationRole, EducationArticle[]> = {
       ],
       sourceName: 'Bank Indonesia — QRIS',
       sourceUrl: 'https://www.bi.go.id/id/fungsi-utama/sistem-pembayaran/ritel/kanal-layanan/QRIS/default.aspx',
+    },
+    {
+      id: 'atur-anggaran',
+      title: 'Atur Anggaran Belanja',
+      summary: 'Rencanakan pengeluaran agar belanja tetap sesuai kebutuhan dan kemampuan.',
+      icon: CircleDollarSign,
+      category: 'Keuangan pribadi',
+      paragraphs: [
+        'Menentukan batas pengeluaran sebelum berbelanja membantu kamu memprioritaskan kebutuhan dan menghindari keputusan yang terburu-buru.',
+        'Catat pengeluaran secara sederhana dan tinjau kembali secara berkala agar kamu mengetahui ke mana uang digunakan.',
+      ],
+      tips: [
+        'Tentukan anggaran belanja sebelum membuka katalog.',
+        'Periksa total pesanan sebelum membayar.',
+        'Sisihkan dana untuk kebutuhan utama terlebih dahulu.',
+      ],
+      sourceName: 'OJK — Sikapi Uangmu',
+      sourceUrl: 'https://sikapiuangmu.ojk.go.id/FrontEnd/CMS/Category/130',
+    },
+    {
+      id: 'simpan-bukti',
+      title: 'Simpan Bukti Transaksi',
+      summary: 'Jaga catatan pesanan dan bukti pembayaran sampai pesanan diterima.',
+      icon: ClipboardList,
+      category: 'Transaksi aman',
+      paragraphs: [
+        'Nomor pesanan dan bukti pembayaran dapat membantu pembeli serta penjual mencocokkan detail transaksi ketika ada pertanyaan.',
+        'Gunakan fitur Pesanan Saya untuk melihat status dan jadwal pembayaran. Hindari membagikan data rahasia seperti PIN atau kata sandi.',
+      ],
+      tips: [
+        'Pastikan nominal serta tujuan pembayaran benar.',
+        'Simpan bukti transaksi pada tempat yang aman.',
+        'Hubungi penjual melalui kanal yang disepakati jika status belum berubah.',
+      ],
+      sourceName: 'Bank Indonesia — Sistem Pembayaran',
+      sourceUrl: 'https://www.bi.go.id/id/fungsi-utama/sistem-pembayaran/default.aspx',
     },
   ],
   seller: [
@@ -157,6 +193,24 @@ const articles: Record<EducationRole, EducationArticle[]> = {
       sourceName: 'Bank Indonesia — QRIS',
       sourceUrl: 'https://www.bi.go.id/id/fungsi-utama/sistem-pembayaran/ritel/kanal-layanan/QRIS/default.aspx',
     },
+    {
+      id: 'catat-keuangan',
+      title: 'Catat Keuangan Usaha',
+      summary: 'Pisahkan catatan usaha dari pengeluaran pribadi agar kondisi usaha lebih mudah dipantau.',
+      icon: CircleDollarSign,
+      category: 'Keuangan usaha',
+      paragraphs: [
+        'Catatan sederhana tentang penjualan, biaya bahan, dan biaya operasional membantu penjual memahami hasil usaha.',
+        'Simpan bukti transaksi dan perbarui catatan secara rutin. Gunakan data tersebut saat menentukan harga dan merencanakan stok.',
+      ],
+      tips: [
+        'Catat pemasukan dan biaya pada hari yang sama.',
+        'Simpan bukti transaksi dengan tanggal dan keterangan.',
+        'Tinjau ringkasan usaha secara berkala.',
+      ],
+      sourceName: 'U.S. Small Business Administration — Manage your finances',
+      sourceUrl: 'https://www.sba.gov/business-guide/manage-your-business/manage-your-finances',
+    },
   ],
 }
 
@@ -217,7 +271,10 @@ export default function Education({ role }: { role: EducationRole }) {
     return () => { active = false }
   }, [role])
 
-  const roleArticles = syncedArticles.length ? syncedArticles : articles[role]
+  const curatedArticles = articles[role]
+  const roleArticles = syncedArticles.length >= 5
+    ? syncedArticles
+    : [...syncedArticles, ...curatedArticles.filter(article => !syncedArticles.some(synced => synced.id === article.id))].slice(0, 5)
   const selectedArticle = roleArticles.find(article => article.id === selectedId)
   const roleName = role === 'buyer' ? 'Pembeli' : 'Penjual'
 
@@ -249,9 +306,8 @@ export default function Education({ role }: { role: EducationRole }) {
       <div><span>PESANAJA</span><h1>{role === 'buyer' ? 'Edukasi Pembeli' : 'Belajar Jualan'}</h1><p>{role === 'buyer' ? 'Panduan singkat agar belanja pre-order makin nyaman.' : 'Ide dan panduan untuk mengembangkan tokomu.'}</p></div>
       {lastUpdated && <small className="education-updated">Diperbarui {new Date(lastUpdated).toLocaleDateString('id-ID', { dateStyle: 'medium' })}</small>}
     </header>
-    {syncError && <p className="education-sync-warning" role="status">{syncError} Menampilkan panduan pilihan sementara.</p>}
+    {syncError && <p className="education-sync-warning" role="status">{syncError}</p>}
     {syncLoading && <p className="education-sync-status" role="status">Memeriksa artikel terbaru…</p>}
-    {!syncLoading && !syncError && !syncedArticles.length && <p className="education-sync-status" role="status">Belum ada artikel dari sumber otomatis. Menampilkan panduan pilihan sementara.</p>}
     <div className="education-library-grid">
       {roleArticles.map(article => {
         const Icon = article.icon
