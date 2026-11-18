@@ -16,8 +16,9 @@ select cron.schedule(
   '0 2 * * 1',
   $job$
     select net.http_post(
-      url := (select decrypted_secret from vault.decrypted_secrets where name = 'project_url')
+      url := rtrim((select decrypted_secret from vault.decrypted_secrets where name = 'project_url'), '/')
         || '/functions/v1/refresh-education',
+      timeout_milliseconds := 120000,
       headers := jsonb_build_object(
         'Content-Type', 'application/json',
         'apikey', (select decrypted_secret from vault.decrypted_secrets where name = 'service_role_key'),

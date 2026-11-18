@@ -90,7 +90,8 @@ export default function Auth({
     setBusy(true)
     try {
       if (mode === 'reset') {
-        const { error: resetError } = await supabase.auth.resetPasswordForEmail(normalizedEmail, { redirectTo: `${location.origin}/` })
+        const redirectTo = new URL('/?recovery=password', location.origin).toString()
+        const { error: resetError } = await supabase.auth.resetPasswordForEmail(normalizedEmail, { redirectTo })
         if (resetError) throw resetError
         setMessage('Tautan reset kata sandi sudah dikirim ke email kamu.')
         return

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Check, Clock3, ExternalLink, RefreshCw, ShoppingBag } from 'lucide-react'
+import { Check, Clock3, ExternalLink, RefreshCw, ShoppingBag, X } from 'lucide-react'
 import { supabase } from './lib/supabase'
 
 type Payment = { id: string; method: string | null; status: string; amount: number; proof_url: string | null; installment_number: number | null; due_at: string | null }
@@ -11,6 +11,8 @@ type SellerOrder = {
   total: number
   created_at: string
   received_at: string | null
+  cancelled_by: string | null
+  cancellation_reason: string | null
   buyer: { full_name: string | null } | null
   order_items: OrderItem[]
   payments: Payment[]
@@ -21,12 +23,16 @@ const orderStatusName = (status: string) => ({
   ordered: 'Belum bayar', unpaid: 'Belum bayar', installment: 'Dicicil',
   paid: 'Dibayar', completed: 'Dibayar', cancelled: 'Dibatalkan',
 }[status] ?? status)
+const paymentStatusName = (status: string) => ({ paid: 'Dibayar', rejected: 'Dibatalkan', refunded: 'Dikembalikan' }[status] ?? 'Belum bayar')
 
 export default function SellerOrders({ storeId }: { storeId: string }) {
   const [orders, setOrders] = useState<SellerOrder[]>([])
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [busyPayment, setBusyPayment] = useState<string | null>(null)
+  const [busyCancelOrder, setBusyCancelOrder] = useState(false)
+  const [cancelTarget, setCancelTarget] = useState<SellerOrder | null>(null)
+  const [cancelReason, setCancelReason] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [proofLinks, setProofLinks] = useState<Record<string, string>>({})
@@ -41,7 +47,7 @@ export default function SellerOrders({ storeId }: { storeId: string }) {
     setError('')
     const { data, error: loadError } = await supabase
       .from('orders')
-      .select('id,order_number,status,total,created_at,received_at,buyer:profiles!orders_buyer_id_fkey(full_name),order_items(product_name,variant,quantity,line_total),payments(id,method,status,amount,proof_url,installment_number,due_at)')
+      .select('id,order_number,status,total,created_at,received_at,cancelled_by,cancellation_reason,buyer:profiles!orders_buyer_id_fkey(full_name),order_items(product_name,variant,quantity,line_total),payments(id,method,status,amount,proof_url,installment_number,due_at)')
       .eq('store_id', storeId)
       .order('created_at', { ascending: false })
     if (loadError) setError(`Pesanan gagal dimuat: ${loadError.message}`)
@@ -65,6 +71,36 @@ export default function SellerOrders({ storeId }: { storeId: string }) {
     setBusyPayment(null)
   }
 
+  async function cancelOrder(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!supabase || !cancelTarget) return
+    const reason = cancelReason.trim()
+    if (!reason) {
+      setError('Alasan pembatalan wajib diisi.')
+      return
+    }
+    setBusyCancelOrder(true)
+    setError('')
+    setNotice('')
+    try {
+      const { error: cancelError } = await supabase.rpc('cancel_seller_order', {
+        p_order_id: cancelTarget.id,
+        p_reason: reason,
+      })
+      if (cancelError) setError(`Pesanan gagal dibatalkan: ${cancelError.message}`)
+      else {
+        setNotice('Pesanan dibatalkan dan stok dikembalikan.')
+        setCancelTarget(null)
+        setCancelReason('')
+        await loadOrders()
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? `Pesanan gagal dibatalkan: ${cause.message}` : 'Pesanan gagal dibatalkan. Coba lagi.')
+    } finally {
+      setBusyCancelOrder(false)
+    }
+  }
+
   async function openProof(path: string) {
     if (!supabase) return
     const { data, error: proofError } = await supabase.storage.from('payment-proofs').createSignedUrl(path, 300)
@@ -79,34 +115,56 @@ export default function SellerOrders({ storeId }: { storeId: string }) {
   })
 
   return <section className="seller-orders-page">
-    <div className="seller-orders-heading"><div><span>WORKSPACE</span><h1>Riwayat Pelanggan</h1><p>Cari pesanan dan pantau status pembayaran serta penerimaan.</p></div><button onClick={() => void loadOrders()} disabled={loading}><RefreshCw size={15}/> Muat ulang</button></div>
-    {error && <p className="seller-orders-message error" role="alert">{error}</p>}
+    <div className="seller-orders-heading"><div><span>WORKSPACE</span><h1>Riwayat Pelanggan</h1><p>Pantau cicilan, periksa bukti pembayaran, dan kelola pesanan.</p></div><button onClick={() => void loadOrders()} disabled={loading}><RefreshCw size={15}/> Muat ulang</button></div>
+    {error && !cancelTarget && <p className="seller-orders-message error" role="alert">{error}</p>}
     {notice && <p className="seller-orders-message success" role="status">{notice}</p>}
     {!loading && orders.length > 0 && <label className="seller-orders-search"><ShoppingBag size={16}/><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Cari nama pembeli, produk, atau nomor pesanan"/></label>}
     {loading ? <div className="seller-orders-empty">Memuat pesanan…</div> : visibleOrders.length ? <div className="seller-orders-list">
       {visibleOrders.map(order => {
         const payments = [...(order.payments ?? [])].sort((a, b) => (a.installment_number ?? 1) - (b.installment_number ?? 1))
         const paid = order.status === 'paid' || order.status === 'completed'
+        const installmentPayments = payments.filter(payment => payment.installment_number !== null)
+        const paidInstallments = installmentPayments.filter(payment => payment.status === 'paid')
+        const installmentPaidAmount = paidInstallments.reduce((total, payment) => total + payment.amount, 0)
+        const canCancel = ['ordered', 'unpaid', 'installment'].includes(order.status) && !payments.some(payment => payment.status === 'paid')
         const statusClass = order.status === 'cancelled' ? 'cancelled' : order.status === 'installment' ? 'installment' : paid ? 'paid' : ''
+        const statusLabel = order.status === 'cancelled' && order.cancelled_by === 'seller'
+          ? 'Dibatalkan penjual'
+          : order.status === 'cancelled' && order.cancelled_by === 'buyer'
+            ? 'Dibatalkan pembeli'
+            : orderStatusName(order.status)
         return <article className="seller-order-card" key={order.id}>
-          <div className="seller-order-top"><div><b>{order.order_number}</b><span><Clock3 size={13}/>{new Date(order.created_at).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}</span></div><span className={`seller-order-status ${order.received_at ? 'received' : statusClass}`}>{order.received_at ? 'Pesanan diterima' : orderStatusName(order.status)}</span></div>
+          <div className="seller-order-top"><div><b>{order.order_number}</b><span><Clock3 size={13}/>{new Date(order.created_at).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}</span></div><span className={`seller-order-status ${order.received_at ? 'received' : statusClass}`}>{order.received_at ? 'Pesanan diterima' : statusLabel}</span></div>
           <p className="seller-order-buyer">Pembeli: <b>{order.buyer?.full_name || 'Pembeli'}</b></p>
+          {order.status === 'cancelled' && order.cancelled_by === 'seller' && order.cancellation_reason && <p className="order-cancellation-reason"><b>Alasan pembatalan:</b> {order.cancellation_reason}</p>}
           <div className="seller-order-items">{(order.order_items ?? []).map((item, index) => <div key={`${item.product_name}-${index}`}><span>{item.product_name}{item.variant ? ` (${item.variant})` : ''} × {item.quantity}</span><b>{money(item.line_total)}</b></div>)}</div>
           <div className="seller-order-bottom"><div><span>Total pembayaran</span><b>{money(order.total)}</b></div></div>
+          {installmentPayments.length > 0 && <div className="seller-installment-progress"><b>Cicilan dibayar: {paidInstallments.length} dari {installmentPayments.length}</b><span>{money(installmentPaidAmount)} diterima dari total {money(order.total)}</span></div>}
           {payments.map(payment => {
             const installmentNumber = payment.installment_number
+            const missingProof = payment.method !== 'cash' && !payment.proof_url
             const blockedByEarlierInstallment = installmentNumber !== null
               && installmentNumber > 1
               && payments.some(previous => previous.installment_number !== null
                 && previous.installment_number < installmentNumber
                 && previous.status !== 'paid')
             return <div className="seller-payment-row" key={payment.id}>
-              <div><b>{installmentNumber ? `${installmentNumber === 1 ? 'Uang muka' : `Cicilan ${installmentNumber}`} dari 3` : 'Pembayaran'}</b><span>{money(payment.amount)} · {payment.method === 'qris' ? 'QRIS' : payment.method === 'transfer' ? 'Transfer' : payment.method === 'cash' ? 'Tunai' : 'Belum dipilih'}{payment.due_at ? ` · Jatuh tempo ${new Date(payment.due_at).toLocaleDateString('id-ID')}` : ''}</span><small>{payment.status === 'paid' ? 'Dibayar' : 'Belum bayar'}</small></div>
-              <div className="seller-order-actions">{payment.proof_url && (proofLinks[payment.proof_url] ? <a className="seller-proof-button" href={proofLinks[payment.proof_url]} target="_blank" rel="noreferrer"><ExternalLink size={15}/> Buka bukti</a> : <button className="seller-proof-button" onClick={() => void openProof(payment.proof_url!)}><ExternalLink size={15}/> Lihat bukti</button>)}{payment.status === 'pending' && order.status !== 'cancelled' && <button className="seller-confirm-button" disabled={busyPayment === payment.id || blockedByEarlierInstallment} onClick={() => void confirmPayment(payment.id)}><Check size={15}/>{busyPayment === payment.id ? 'Memproses…' : blockedByEarlierInstallment ? 'Menunggu cicilan sebelumnya' : 'Konfirmasi pembayaran'}</button>}</div>
+              <div><b>{installmentNumber ? `${installmentNumber === 1 ? 'Uang muka' : `Cicilan ${installmentNumber}`} dari 3` : 'Pembayaran'}</b><span>{money(payment.amount)} · {payment.method === 'qris' ? 'QRIS' : payment.method === 'transfer' ? 'Transfer' : payment.method === 'cash' ? 'Tunai' : 'Belum dipilih'}{payment.due_at ? ` · Jatuh tempo ${new Date(payment.due_at).toLocaleDateString('id-ID')}` : ''}</span><small>{paymentStatusName(payment.status)}</small></div>
+              <div className="seller-order-actions">{payment.proof_url && (proofLinks[payment.proof_url] ? <a className="seller-proof-button" href={proofLinks[payment.proof_url]} target="_blank" rel="noreferrer"><ExternalLink size={15}/> Buka bukti</a> : <button className="seller-proof-button" onClick={() => void openProof(payment.proof_url!)}><ExternalLink size={15}/> Lihat bukti</button>)}{payment.status === 'pending' && order.status !== 'cancelled' && <button className="seller-confirm-button" disabled={busyPayment === payment.id || blockedByEarlierInstallment || missingProof} onClick={() => void confirmPayment(payment.id)}><Check size={15}/>{busyPayment === payment.id ? 'Memproses…' : blockedByEarlierInstallment ? 'Menunggu cicilan sebelumnya' : missingProof ? 'Menunggu foto bukti' : 'Konfirmasi pembayaran'}</button>}</div>
             </div>
           })}
+          {canCancel && <div className="seller-order-actions seller-cancel-actions"><button className="seller-cancel-order" onClick={() => { setCancelTarget(order); setCancelReason(''); setError('') }}><X size={15}/> Batalkan pesanan</button></div>}
         </article>
       })}
     </div> : <div className="seller-orders-empty"><ShoppingBag size={26}/><h2>{orders.length ? 'Tidak ada pesanan yang cocok' : 'Belum ada riwayat pelanggan'}</h2><p>{orders.length ? 'Coba nama atau nomor pesanan lain.' : 'Pesanan pembeli akan muncul di sini setelah mereka memesan.'}</p></div>}
+    {cancelTarget && <div className="seller-cancel-overlay" onClick={() => {
+      if (!busyCancelOrder) { setCancelTarget(null); setCancelReason(''); setError('') }
+    }}><form className="seller-cancel-dialog" role="dialog" aria-modal="true" aria-labelledby="seller-cancel-title" onClick={event => event.stopPropagation()} onSubmit={event => void cancelOrder(event)}>
+      <h2 id="seller-cancel-title">Batalkan pesanan {cancelTarget.order_number}</h2>
+      <p>Pesanan yang belum dibayar akan dibatalkan dan stoknya dikembalikan. Pembeli dapat melihat alasan ini di Pesanan Saya.</p>
+      {error && <p className="seller-orders-message error" role="alert">{error}</p>}
+      <label>Alasan pembatalan<textarea autoFocus required maxLength={500} value={cancelReason} onChange={event => setCancelReason(event.target.value)} placeholder="Contoh: bukti pembayaran tidak sesuai"/></label>
+      <div className="seller-cancel-dialog-actions"><button type="button" disabled={busyCancelOrder} onClick={() => { setCancelTarget(null); setCancelReason(''); setError('') }}>Kembali</button><button type="submit" disabled={busyCancelOrder || !cancelReason.trim()}>{busyCancelOrder ? 'Membatalkan…' : 'Konfirmasi pembatalan'}</button></div>
+    </form></div>}
   </section>
 }

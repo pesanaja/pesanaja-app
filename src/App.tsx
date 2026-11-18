@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import Auth from './Auth'
 import BuyerStore from './BuyerStore'
 import Onboarding from './Onboarding'
@@ -17,6 +17,7 @@ function App() {
   const [registeredStoreName, setRegisteredStoreName] = useState('')
   const [registeredOwnerName, setRegisteredOwnerName] = useState('')
   const [registeredPhone, setRegisteredPhone] = useState('')
+  const authUserId = useRef<string | null>(null)
 
   useEffect(() => {
     if (!supabase) return
@@ -24,9 +25,13 @@ function App() {
       if (event === 'PASSWORD_RECOVERY') setPasswordRecovery(true)
       if (event === 'TOKEN_REFRESHED') return
       const isSeller = session?.user.user_metadata.role === 'seller'
+      const userChanged = session?.user.id !== authUserId.current
+      authUserId.current = session?.user.id ?? null
       if (event === 'INITIAL_SESSION' || event === 'SIGNED_IN') {
-        setSellerProfileLoading(Boolean(session && isSeller))
-        setSellerProfileError('')
+        if (userChanged) {
+          setSellerProfileLoading(Boolean(session && isSeller))
+          setSellerProfileError('')
+        }
       } else if (!session) {
         setSellerProfileLoading(false)
         setSellerProfileError('')
@@ -87,6 +92,7 @@ function App() {
   if (passwordRecovery) return <Auth key="password-recovery" initialMode="update-password" onSignedIn={setUserId} onRecoveryComplete={() => {
     setPasswordRecovery(false)
     setUserId(null)
+    window.history.replaceState(null, '', window.location.pathname)
   }}/>
   if (supabase && !userId) return <Auth onSignedIn={setUserId}/>
   if (userRole === 'buyer') return <BuyerStore userId={userId} onSignOut={async () => {

@@ -17,8 +17,9 @@ type EducationArticle = {
   sourceName: string
   sourceUrl: string
   publishedAt?: string
+  coverUrl?: string | null
 }
-type SyncedArticle = { id: string; title: string; summary: string | null; body: string; category: string | null; source_name: string | null; source_url: string | null; published_at: string; synced_at: string | null }
+type SyncedArticle = { id: string; title: string; summary: string | null; body: string; category: string | null; cover_url: string | null; source_name: string | null; source_url: string | null; published_at: string; synced_at: string | null }
 
 const articles: Record<EducationRole, EducationArticle[]> = {
   buyer: [
@@ -214,6 +215,19 @@ const articles: Record<EducationRole, EducationArticle[]> = {
   ],
 }
 
+function EducationArt({ article, iconSize, showSpark = false }: { article: EducationArticle; iconSize: number; showSpark?: boolean }) {
+  const Icon = article.icon
+  const hasCover = Boolean(article.coverUrl)
+  return <div className={`education-art education-art-${article.id}${hasCover ? ' has-cover' : ''}`}>
+    {article.coverUrl && <img className="education-cover-image" src={article.coverUrl} alt="" loading="lazy" referrerPolicy="no-referrer" onError={event => {
+      event.currentTarget.remove()
+      event.currentTarget.parentElement?.classList.remove('has-cover')
+    }}/>}
+    <Icon size={iconSize} strokeWidth={iconSize > 60 ? 1.4 : 1.5}/>
+    {showSpark && <span className="education-art-spark">✦</span>}
+  </div>
+}
+
 export default function Education({ role }: { role: EducationRole }) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [syncedArticles, setSyncedArticles] = useState<EducationArticle[]>([])
@@ -235,7 +249,7 @@ export default function Education({ role }: { role: EducationRole }) {
       try {
         const { data, error } = await supabase
           .from('education_articles')
-          .select('id,title,summary,body,category,source_name,source_url,published_at,synced_at')
+          .select('id,title,summary,body,category,cover_url,source_name,source_url,published_at,synced_at')
           .contains('audience', [role])
           .not('source_url', 'is', null)
           .not('published_at', 'is', null)
@@ -257,6 +271,7 @@ export default function Education({ role }: { role: EducationRole }) {
             sourceName: article.source_name || 'Sumber artikel',
             sourceUrl: article.source_url,
             publishedAt: article.published_at,
+            coverUrl: article.cover_url,
           }] : []))
           const syncDates = rows.map(article => article.synced_at).filter((value): value is string => Boolean(value)).sort()
           setLastUpdated(syncDates[syncDates.length - 1] ?? null)
@@ -279,11 +294,10 @@ export default function Education({ role }: { role: EducationRole }) {
   const roleName = role === 'buyer' ? 'Pembeli' : 'Penjual'
 
   if (selectedArticle) {
-    const Icon = selectedArticle.icon
     return <section className={`education-library education-library-${role}`}>
       <button className="education-back" onClick={() => setSelectedId(null)}><ArrowLeft size={17}/> Kembali ke edukasi</button>
       <header className="education-detail-hero">
-        <div className={`education-art education-art-${selectedArticle.id}`}><Icon size={64} strokeWidth={1.4}/></div>
+        <EducationArt article={selectedArticle} iconSize={64}/>
         <div className="education-detail-copy">
           <span className="education-detail-eyebrow">{selectedArticle.category} · Untuk {roleName.toLowerCase()}</span>
           <h1>{selectedArticle.title}</h1>
@@ -310,9 +324,8 @@ export default function Education({ role }: { role: EducationRole }) {
     {syncLoading && <p className="education-sync-status" role="status">Memeriksa artikel terbaru…</p>}
     <div className="education-library-grid">
       {roleArticles.map(article => {
-        const Icon = article.icon
         return <article className="education-library-card" key={article.id}>
-          <div className={`education-art education-art-${article.id}`}><Icon size={54} strokeWidth={1.5}/><span className="education-art-spark">✦</span></div>
+          <EducationArt article={article} iconSize={54} showSpark/>
           <div className="education-library-card-content">
             <div className="education-card-title"><h2>{article.title}</h2><span><BadgeCheck size={13}/>{roleName}</span></div>
             <small className="education-card-category"><BookOpenCheck size={13}/>{article.category}</small>

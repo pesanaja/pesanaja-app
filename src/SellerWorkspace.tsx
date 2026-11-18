@@ -41,9 +41,10 @@ type OperatingExpense = { id: string; description: string; amount: number; occur
 type ProductForm = { name: string; category: string; description: string; price: string; cost: string; stock: string }
 
 const money = (value: number) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(value)
-const maxSafeMoney = Number.MAX_SAFE_INTEGER
+const maxProductAmount = 100_000_000
+const maxProductAmountLabel = money(maxProductAmount)
 const productSaveErrorMessage = (message: string) => /out of range for type integer/i.test(message)
-  ? 'Harga melebihi batas database lama. Terapkan migration 20261118193000_expand_monetary_range_and_sync_batch_prices.sql di Supabase, lalu coba lagi.'
+  ? `Harga jual atau modal produk maksimal ${maxProductAmountLabel}.`
   : `Produk gagal disimpan: ${message}`
 const productCategories = ['Makanan Berat & Bento', 'Kue dan Roti', 'Minuman', 'Lainnya']
 const statusName = (status: string) => ({
@@ -59,10 +60,13 @@ const localDateInput = () => {
   const date = new Date()
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 }
+const batchDisplayStatus = (batch: Batch, now: number) =>
+  batch.status === 'open' && batch.closes_at && new Date(batch.closes_at).getTime() <= now ? 'closed' : batch.status
 type SellerProfileForm = { storeName: string; ownerName: string; phone: string; description: string; pickupLocation: string; paymentDetails: string; logoUrl: string | null; qrisImagePath: string | null }
 
 export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreNameChange }: { userId: string; storeName: string; onSignOut: () => void; onStoreNameChange: (name: string) => void }) {
   const [active, setActive] = useState('Ringkasan')
+  const [currentTime, setCurrentTime] = useState(Date.now())
   const [products, setProducts] = useState<Product[]>([])
   const [batches, setBatches] = useState<Batch[]>([])
   const [batchProducts, setBatchProducts] = useState<BatchProduct[]>([])
@@ -100,6 +104,11 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
   const [productImagePreview, setProductImagePreview] = useState('')
   const [expenseForm, setExpenseForm] = useState({ description: '', amount: '', occurredOn: localDateInput() })
   const [expenseSaving, setExpenseSaving] = useState(false)
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setCurrentTime(Date.now()), 30_000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   useEffect(() => {
     if (!logoFile) {
@@ -191,6 +200,48 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
 
   useEffect(() => { void loadData() }, [loadData])
 
+  useEffect(() => {
+    const client = supabase
+    if (!client || !['Produk', 'Batch pre-order'].includes(active)) return
+    let activeRequest = true
+    const refreshInventory = async () => {
+      const { data: productRows, error: productError } = await client
+        .from('products')
+        .select('id,stock')
+        .eq('store_id', userId)
+      if (productError) {
+        if (activeRequest) setError(`Stok produk gagal diperbarui: ${productError.message}`)
+        return
+      }
+
+      let batchRows: BatchProduct[] | null = null
+      if (active === 'Batch pre-order' && batches.length) {
+        const { data, error: batchError } = await client
+          .from('batch_products')
+          .select('batch_id,product_id,stock_limit')
+          .in('batch_id', batches.map(batch => batch.id))
+        if (batchError) {
+          if (activeRequest) setError(`Stok batch gagal diperbarui: ${batchError.message}`)
+          return
+        }
+        batchRows = data as BatchProduct[]
+      }
+      if (!activeRequest) return
+      const stockByProduct = new Map((productRows ?? []).map(row => [row.id, row.stock as number | null]))
+      setProducts(current => current.map(product => stockByProduct.has(product.id)
+        ? { ...product, stock: stockByProduct.get(product.id) ?? null }
+        : product))
+      if (batchRows) setBatchProducts(batchRows)
+    }
+
+    void refreshInventory()
+    const timer = window.setInterval(() => void refreshInventory(), 15_000)
+    return () => {
+      activeRequest = false
+      window.clearInterval(timer)
+    }
+  }, [active, batches, userId])
+
   async function saveSellerProfile(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!supabase) {
@@ -281,7 +332,7 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
     .filter(product => (soldByProduct.get(product.id) ?? 0) > 0)
     .sort((a, b) => (soldByProduct.get(b.id) ?? 0) - (soldByProduct.get(a.id) ?? 0))
     .slice(0, 3), [products, soldByProduct])
-  const activeBatches = batches.filter(batch => batch.status === 'open' && (!batch.closes_at || new Date(batch.closes_at) > new Date()))
+  const activeBatches = batches.filter(batch => batchDisplayStatus(batch, currentTime) === 'open')
   const paidOrders = orders.filter(order => order.status === 'paid' || order.status === 'completed')
   const revenue = paidOrders.reduce((sum, order) => sum + order.total, 0)
   const receivedPaymentTotal = payments.filter(payment => payment.status === 'paid').reduce((sum, payment) => sum + payment.amount, 0)
@@ -355,12 +406,12 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
       setError('Nama produk wajib diisi dan tidak boleh hanya berisi spasi.')
       return
     }
-    if (!Number.isSafeInteger(price) || price <= 0 || price > maxSafeMoney) {
-      setError('Harga jual harus berupa bilangan bulat lebih dari Rp0.')
+    if (!Number.isSafeInteger(price) || price <= 0 || price > maxProductAmount) {
+      setError(`Harga jual harus bilangan bulat lebih dari Rp0 dan maksimal ${maxProductAmountLabel}.`)
       return
     }
-    if (!Number.isSafeInteger(costPrice) || costPrice < 0 || costPrice > maxSafeMoney) {
-      setError('Modal harus berupa bilangan bulat Rp0 atau lebih.')
+    if (!Number.isSafeInteger(costPrice) || costPrice < 0 || costPrice > maxProductAmount) {
+      setError(`Modal harus bilangan bulat Rp0 atau lebih dan maksimal ${maxProductAmountLabel}.`)
       return
     }
     if (stock !== null && (!Number.isSafeInteger(stock) || stock < 0)) {
@@ -581,11 +632,16 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
         </form>
       </section> : active === 'Belajar jualan' ? <section className="workspace-page"><Education role="seller"/></section> : active === 'Riwayat pelanggan' ? <SellerOrders storeId={userId}/> : active === 'Produk' ? <section className="workspace-page">
         <PageHeading eyebrow="KATALOG TOKO" title="Produk" description="Kelola produk yang tersedia di tokomu." action={<button className="primary-button" onClick={() => openProductForm()}><Plus size={17}/> Tambah produk</button>}/>
+        {error && <p className="workspace-message error" role="alert">{error}</p>}
         <label className="workspace-search"><Search size={16}/><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Cari produk"/></label>
         {loading ? <EmptyState text="Memuat produk…"/> : visibleProducts.length ? <div className="workspace-product-list">{visibleProducts.map(product => <ProductRow key={product.id} product={product} sold={soldByProduct.get(product.id) ?? 0} onToggle={() => void toggleProduct(product)} onView={() => setViewProduct(product)} onEdit={() => openProductForm(product)}/>)}</div> : <EmptyState text={search ? 'Produk tidak ditemukan.' : 'Belum ada produk. Tambahkan produk pertamamu untuk mulai berjualan.'}/>}
       </section> : active === 'Batch pre-order' ? <section className="workspace-page">
         <PageHeading eyebrow="JADWAL PENJUALAN" title="Batch pre-order" description="Buka batch dan pilih produk yang ingin dijual." action={<button className="primary-button" onClick={() => openBatchForm()} disabled={!products.some(product => product.is_active)}><Plus size={17}/> Buat batch</button>}/>
-        {loading ? <EmptyState text="Memuat batch…"/> : batches.length ? <div className="workspace-batch-list">{batches.map(batch => <article className="workspace-batch-card" key={batch.id}><div><span className={`workspace-batch-status ${batch.status}`}>{batch.status === 'open' ? 'Dibuka' : batch.status === 'draft' ? 'Draft' : batch.status}</span><h2>{batch.name}</h2><p>{batchProducts.filter(item => item.batch_id === batch.id).length} produk · {batch.closes_at ? `Tutup ${new Date(batch.closes_at).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}` : 'Tanpa batas waktu'}</p></div><span>{orders.filter(order => order.batch_id === batch.id).length} pesanan</span><div className="workspace-row-actions"><button className="secondary-button" onClick={() => void viewBatchProducts(batch)}><Eye size={15}/> Lihat</button>{['open', 'draft'].includes(batch.status) && <button className="secondary-button" onClick={() => openBatchForm(batch)}><Pencil size={15}/> Edit</button>}</div></article>)}</div> : <EmptyState text="Belum ada batch. Buat batch untuk menampilkan produk di halaman belanja."/>}
+        {error && <p className="workspace-message error" role="alert">{error}</p>}
+        {loading ? <EmptyState text="Memuat batch…"/> : batches.length ? <div className="workspace-batch-list">{batches.map(batch => {
+          const displayStatus = batchDisplayStatus(batch, currentTime)
+          return <article className="workspace-batch-card" key={batch.id}><div><span className={`workspace-batch-status ${displayStatus}`}>{displayStatus === 'open' ? 'Dibuka' : displayStatus === 'closed' ? 'Ditutup' : displayStatus === 'draft' ? 'Draft' : displayStatus}</span><h2>{batch.name}</h2><p>{batchProducts.filter(item => item.batch_id === batch.id).length} produk · {batch.closes_at ? `Tutup ${new Date(batch.closes_at).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}` : 'Tanpa batas waktu'}</p></div><span>{orders.filter(order => order.batch_id === batch.id).length} pesanan</span><div className="workspace-row-actions"><button className="secondary-button" onClick={() => void viewBatchProducts(batch)}><Eye size={15}/> Lihat</button>{['open', 'draft'].includes(displayStatus) && <button className="secondary-button" onClick={() => openBatchForm(batch)}><Pencil size={15}/> Edit</button>}</div></article>
+        })}</div> : <EmptyState text="Belum ada batch. Buat batch untuk menampilkan produk di halaman belanja."/>}
       </section> : active === 'Keuangan' ? <section className="workspace-page">
         <PageHeading eyebrow="RINGKASAN TRANSAKSI" title="Keuangan" description="Pantau pembayaran pesanan di tokomu."/>
         <div className="finance-total"><span>Total pembayaran diterima</span><strong>{money(receivedPaymentTotal)}</strong><small>Pembayaran penuh dan cicilan yang sudah dikonfirmasi</small></div>
@@ -634,7 +690,7 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
               <button className="text-link" onClick={() => setActive('Produk')}>Lihat semua produk <ArrowRight size={14}/></button>
             </div>
           </section>
-          <section className="panel workspace-recent"><div className="panel-heading"><div><h3>Pesanan terbaru</h3><p>Pesanan dari pembeli</p></div><button className="text-link" onClick={() => setActive('Pesanan')}>Lihat semua <ArrowRight size={14}/></button></div>
+          <section className="panel workspace-recent"><div className="panel-heading"><div><h3>Pesanan terbaru</h3><p>Pesanan dari pembeli</p></div><button className="text-link" onClick={() => setActive('Riwayat pelanggan')}>Lihat semua <ArrowRight size={14}/></button></div>
             {orders.length ? <div className="workspace-table-wrap"><table className="workspace-table"><thead><tr><th>ID Pesanan</th><th>Pembeli</th><th>Produk</th><th>Total</th><th>Status</th></tr></thead><tbody>{orders.slice(0, 5).map(order => <tr key={order.id}><td>{order.order_number}</td><td>{order.buyer?.full_name || 'Pembeli'}</td><td>{order.order_items.map(item => `${item.product_name}${item.variant ? ` (${item.variant})` : ''} × ${item.quantity}`).join(', ') || '—'}</td><td>{money(order.total)}</td><td><span className={`seller-order-status ${['paid', 'completed'].includes(order.status) ? 'paid' : ''}`}>{statusName(order.status)}</span></td></tr>)}</tbody></table></div> : <EmptyState text="Pesanan pembeli akan muncul di sini."/>}
           </section>
         </>}
@@ -644,9 +700,17 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
     {showProductForm && <div className="modal-backdrop" onClick={closeProductForm}><form className="workspace-modal" onClick={event => event.stopPropagation()} onSubmit={saveProduct}><div className="workspace-modal-heading"><div><span>PRODUK TOKO</span><h2>{editingProduct ? 'Edit produk' : 'Tambah produk'}</h2></div><button type="button" className="icon-button" onClick={closeProductForm} aria-label="Tutup"><X size={18}/></button></div>
       {error && <p className="workspace-message error product-form-error" role="alert">{error}</p>}
       <label>Nama produk<input required maxLength={120} value={productForm.name} onChange={event => setProductForm(current => ({ ...current, name: event.target.value }))}/></label>
-      <div className="workspace-form-grid"><label>Kategori<select value={productForm.category} onChange={event => setProductForm(current => ({ ...current, category: event.target.value }))}><option value="">Pilih kategori</option>{productCategories.map(category => <option key={category} value={category}>{category}</option>)}</select></label><label>Harga jual (Rp)<input type="number" min="1" max={maxSafeMoney} step="1" required value={productForm.price} onChange={event => setProductForm(current => ({ ...current, price: event.target.value }))}/></label></div>
+      <div className="workspace-form-grid"><label>Kategori<select value={productForm.category} onChange={event => setProductForm(current => ({ ...current, category: event.target.value }))}><option value="">Pilih kategori</option>{productCategories.map(category => <option key={category} value={category}>{category}</option>)}</select></label><label>Harga jual (Rp)<input type="number" min="1" max={maxProductAmount} step="1" required value={productForm.price} onChange={event => {
+        const value = event.target.value
+        setProductForm(current => ({ ...current, price: value }))
+        setError(value && Number(value) > maxProductAmount ? `Harga jual maksimal ${maxProductAmountLabel}.` : '')
+      }}/><small>Maksimal {maxProductAmountLabel}</small></label></div>
       <fieldset className="product-variants-field"><legend>Varian produk <small>(opsional, contoh: Cokelat, Matcha)</small></legend>{productVariants.map((variant, index) => <div className="product-variant-row" key={index}><input aria-label={`Varian ${index + 1}`} maxLength={50} placeholder={`Nama varian ${index + 1}`} value={variant} onChange={event => setProductVariants(current => current.map((item, itemIndex) => itemIndex === index ? event.target.value : item))}/><button type="button" className="secondary-button" aria-label={`Hapus varian ${index + 1}`} onClick={() => setProductVariants(current => current.filter((_, itemIndex) => itemIndex !== index))}><X size={15}/></button></div>)}{productVariants.length < 20 && <button type="button" className="add-product-variant" onClick={() => setProductVariants(current => [...current, ''])}><Plus size={15}/> Tambah varian</button>}</fieldset>
-      <div className="workspace-form-grid"><label>Modal per produk (Rp)<input type="number" min="0" max={maxSafeMoney} step="1" value={productForm.cost} onChange={event => setProductForm(current => ({ ...current, cost: event.target.value }))}/></label><label>Stok<input type="number" min="0" step="1" placeholder="Kosong = tanpa batas" value={productForm.stock} onChange={event => setProductForm(current => ({ ...current, stock: event.target.value }))}/></label></div>
+      <div className="workspace-form-grid"><label>Modal per produk (Rp)<input type="number" min="0" max={maxProductAmount} step="1" value={productForm.cost} onChange={event => {
+        const value = event.target.value
+        setProductForm(current => ({ ...current, cost: value }))
+        setError(value && Number(value) > maxProductAmount ? `Modal maksimal ${maxProductAmountLabel}.` : '')
+      }}/><small>Maksimal {maxProductAmountLabel}</small></label><label>Stok<input type="number" min="0" step="1" placeholder="Kosong = tanpa batas" value={productForm.stock} onChange={event => setProductForm(current => ({ ...current, stock: event.target.value }))}/></label></div>
       <label className="product-image-field">Foto produk (opsional)<input type="file" accept="image/png,image/jpeg,image/webp" onChange={event => {
         const file = event.target.files?.[0] ?? null
         if (file && !['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
@@ -676,7 +740,7 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
       <div className="workspace-modal-actions"><button type="button" className="secondary-button" onClick={closeBatchForm}>Batal</button><button className="primary-button" disabled={saving || !products.some(product => product.is_active)}>{saving ? 'Menyimpan…' : editingBatch ? 'Simpan perubahan' : 'Buka batch'}</button></div>
     </form></div>}
     {viewProduct && <div className="modal-backdrop" onClick={() => setViewProduct(null)}><section className="workspace-modal workspace-detail-modal" onClick={event => event.stopPropagation()}><div className="workspace-modal-heading"><div><span>DETAIL PRODUK</span><h2>{viewProduct.name}</h2></div><button type="button" className="icon-button" onClick={() => setViewProduct(null)} aria-label="Tutup"><X size={18}/></button></div>{viewProduct.image_url && <img className="workspace-detail-image" src={viewProduct.image_url} alt={viewProduct.name}/>}<dl className="workspace-detail-list"><div><dt>Kategori</dt><dd>{viewProduct.category || 'Belum diatur'}</dd></div><div><dt>Harga jual</dt><dd>{money(viewProduct.price)}</dd></div><div><dt>Modal</dt><dd>{money(viewProduct.cost_price)}</dd></div><div><dt>Stok</dt><dd>{viewProduct.stock === null ? 'Tanpa batas' : viewProduct.stock}</dd></div><div><dt>Status</dt><dd>{viewProduct.is_active ? 'Aktif' : 'Nonaktif'}</dd></div>{viewProduct.variants.length > 0 && <div><dt>Varian</dt><dd>{viewProduct.variants.join(', ')}</dd></div>}</dl><div className="workspace-detail-description"><b>Deskripsi</b><p>{viewProduct.description || 'Belum ada deskripsi.'}</p></div><div className="workspace-modal-actions"><button className="secondary-button" onClick={() => setViewProduct(null)}>Tutup</button><button className="primary-button" onClick={() => { openProductForm(viewProduct); setViewProduct(null) }}><Pencil size={15}/> Edit produk</button></div></section></div>}
-    {viewBatch && <div className="modal-backdrop" onClick={() => setViewBatch(null)}><section className="workspace-modal workspace-detail-modal" onClick={event => event.stopPropagation()}><div className="workspace-modal-heading"><div><span>DETAIL BATCH</span><h2>{viewBatch.name}</h2></div><button type="button" className="icon-button" onClick={() => setViewBatch(null)} aria-label="Tutup"><X size={18}/></button></div><dl className="workspace-detail-list"><div><dt>Status</dt><dd>{viewBatch.status === 'open' ? 'Dibuka' : viewBatch.status}</dd></div><div><dt>Waktu tutup</dt><dd>{viewBatch.closes_at ? new Date(viewBatch.closes_at).toLocaleString('id-ID', { dateStyle: 'long', timeStyle: 'short' }) : 'Tanpa batas waktu'}</dd></div><div><dt>Pesanan</dt><dd>{orders.filter(order => order.batch_id === viewBatch.id).length}</dd></div></dl><div className="workspace-detail-description"><b>Produk dalam batch</b>{batchProducts.filter(item => item.batch_id === viewBatch.id).map(item => { const product = products.find(candidate => candidate.id === item.product_id); return product ? <p key={product.id}>{product.name} · {money(item.price)}{item.stock_limit !== null ? ` · Stok ${item.stock_limit}` : ''}</p> : null })}</div><div className="workspace-modal-actions"><button className="secondary-button" onClick={() => setViewBatch(null)}>Tutup</button>{['open', 'draft'].includes(viewBatch.status) && <button className="primary-button" onClick={() => { openBatchForm(viewBatch); setViewBatch(null) }}><Pencil size={15}/> Edit batch</button>}</div></section></div>}
+    {viewBatch && <div className="modal-backdrop" onClick={() => setViewBatch(null)}><section className="workspace-modal workspace-detail-modal" onClick={event => event.stopPropagation()}><div className="workspace-modal-heading"><div><span>DETAIL BATCH</span><h2>{viewBatch.name}</h2></div><button type="button" className="icon-button" onClick={() => setViewBatch(null)} aria-label="Tutup"><X size={18}/></button></div><dl className="workspace-detail-list"><div><dt>Status</dt><dd>{batchDisplayStatus(viewBatch, currentTime) === 'open' ? 'Dibuka' : batchDisplayStatus(viewBatch, currentTime) === 'closed' ? 'Ditutup' : batchDisplayStatus(viewBatch, currentTime)}</dd></div><div><dt>Waktu tutup</dt><dd>{viewBatch.closes_at ? new Date(viewBatch.closes_at).toLocaleString('id-ID', { dateStyle: 'long', timeStyle: 'short' }) : 'Tanpa batas waktu'}</dd></div><div><dt>Pesanan</dt><dd>{orders.filter(order => order.batch_id === viewBatch.id).length}</dd></div></dl><div className="workspace-detail-description"><b>Produk dalam batch</b>{batchProducts.filter(item => item.batch_id === viewBatch.id).map(item => { const product = products.find(candidate => candidate.id === item.product_id); return product ? <p key={product.id}>{product.name} · {money(item.price)}{item.stock_limit !== null ? ` · Stok ${item.stock_limit}` : ''}</p> : null })}</div><div className="workspace-modal-actions"><button className="secondary-button" onClick={() => setViewBatch(null)}>Tutup</button>{['open', 'draft'].includes(batchDisplayStatus(viewBatch, currentTime)) && <button className="primary-button" onClick={() => { openBatchForm(viewBatch); setViewBatch(null) }}><Pencil size={15}/> Edit batch</button>}</div></section></div>}
   </div>
 }
 

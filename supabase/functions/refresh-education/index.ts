@@ -7,13 +7,14 @@ type FeedConfig = {
   category: string
   keywords?: string[]
 }
-type FeedItem = { title: string; link: string; description: string; publishedAt: Date }
+type FeedItem = { title: string; link: string; description: string; coverUrl: string | null; publishedAt: Date }
 type EducationArticle = {
   slug: string
   title: string
   summary: string
   body: string
   category: string
+  cover_url: string | null
   audience: Audience[]
   source_name: string
   source_url: string
@@ -41,6 +42,51 @@ function decodeXml(value: string) {
 function extractTag(xml: string, name: string) {
   const expression = new RegExp(`<${name}\\b[^>]*>([\\s\\S]*?)<\\/${name}>`, 'i')
   return expression.exec(xml)?.[1]?.trim() ?? ''
+}
+
+function extractAttribute(tag: string, name: string) {
+  const expression = new RegExp(`\\b${name}=["']([^"']+)["']`, 'i')
+  return expression.exec(tag)?.[1] ?? ''
+}
+
+function isImageUrl(value: string) {
+  try {
+    const url = new URL(value, 'https://image.invalid')
+    return /\.(?:avif|gif|jpe?g|png|webp)$/i.test(url.pathname)
+  } catch {
+    return false
+  }
+}
+
+function safeImageUrl(value: string, baseUrl: string) {
+  try {
+    const url = new URL(decodeXml(value), baseUrl)
+    return url.protocol === 'https:' ? url.toString() : null
+  } catch {
+    return null
+  }
+}
+
+function extractCoverUrl(entry: string, articleUrl: string) {
+  const mediaTags = [...entry.matchAll(/<(media:content|media:thumbnail|enclosure)\b([^>]*?)\/?>/gi)]
+  for (const [, tagName, attributes] of mediaTags) {
+    const url = extractAttribute(attributes, 'url')
+    const type = extractAttribute(attributes, 'type').toLowerCase()
+    const medium = extractAttribute(attributes, 'medium').toLowerCase()
+    const isThumbnail = tagName.toLowerCase() === 'media:thumbnail'
+    if (!url || !(isThumbnail || medium === 'image' || type.startsWith('image/') || isImageUrl(url))) continue
+    const coverUrl = safeImageUrl(url, articleUrl)
+    if (coverUrl) return coverUrl
+  }
+
+  const content = decodeXml(extractTag(entry, 'content:encoded') || extractTag(entry, 'content') || extractTag(entry, 'description') || extractTag(entry, 'summary'))
+  for (const imageTag of content.matchAll(/<img\b[^>]*>/gi)) {
+    const source = extractAttribute(imageTag[0], 'src') || extractAttribute(imageTag[0], 'data-src')
+    if (!source) continue
+    const coverUrl = safeImageUrl(source, articleUrl)
+    if (coverUrl) return coverUrl
+  }
+  return null
 }
 
 function cleanText(value: string) {
@@ -72,7 +118,13 @@ function parseFeed(xml: string, feed: FeedConfig): FeedItem[] {
 
     const searchable = `${title} ${description}`.toLowerCase()
     if (feed.keywords?.length && !feed.keywords.some(keyword => searchable.includes(keyword.toLowerCase()))) return []
-    return [{ title, link: articleUrl.toString(), description, publishedAt }]
+    return [{
+      title,
+      link: articleUrl.toString(),
+      description,
+      coverUrl: extractCoverUrl(entry, articleUrl.toString()),
+      publishedAt,
+    }]
   }).slice(0, maxItemsPerFeed)
 }
 
@@ -159,6 +211,7 @@ Deno.serve(async request => {
           summary: item.description || `Baca panduan terbaru dari ${feed.sourceName}.`,
           body: item.description || `Baca panduan terbaru dari ${feed.sourceName}.`,
           category: feed.category,
+          cover_url: item.coverUrl,
           audience: feed.audience,
           source_name: feed.sourceName,
           source_url: item.link,
@@ -173,7 +226,7 @@ Deno.serve(async request => {
   }
 
   if (!rows.length) {
-    return Response.json({ synced: 0, failures, message: 'Tidak ada artikel baru dari feed yang berhasil dibaca.' }, { status: failures.length ? 502 : 200 })
+    return Response.json({ synced: 0, covers: 0, failures, message: 'Tidak ada artikel baru dari feed yang berhasil dibaca.' }, { status: failures.length ? 502 : 200 })
   }
 
   const rowsByUrl = new Map<string, EducationArticle>()
@@ -200,5 +253,5 @@ Deno.serve(async request => {
     return Response.json({ error: 'Artikel gagal disimpan ke Supabase.' }, { status: 502 })
   }
 
-  return Response.json({ synced: uniqueRows.length, failures })
+  return Response.json({ synced: uniqueRows.length, covers: uniqueRows.filter(row => row.cover_url).length, failures })
 })
