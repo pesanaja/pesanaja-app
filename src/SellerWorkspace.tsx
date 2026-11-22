@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  ArrowRight, BookOpen, ChevronDown, CircleHelp, Clock3, Ellipsis, Eye, Pencil,
+  ArrowRight, BookOpen, ChevronDown, Clock3, Ellipsis, Eye, Pencil, Trash2,
   LayoutDashboard, LogOut, Package, Plus, Search, Settings, ShieldCheck,
   ShoppingBag, ShoppingCart, Sparkles, Wallet, X, Save, Store, Phone, MapPin, CreditCard, Camera,
 } from 'lucide-react'
@@ -46,6 +46,13 @@ const maxProductAmountLabel = money(maxProductAmount)
 const productSaveErrorMessage = (message: string) => /out of range for type integer/i.test(message)
   ? `Harga jual atau modal produk maksimal ${maxProductAmountLabel}.`
   : `Produk gagal disimpan: ${message}`
+const getOwnedProductImagePath = (url: string | null, storeId: string) => {
+  if (!url || !supabase) return null
+  const publicUrl = supabase.storage.from('product-images').getPublicUrl('').data.publicUrl
+  if (!url.startsWith(publicUrl)) return null
+  const path = url.slice(publicUrl.length)
+  return path.startsWith(`${storeId}/`) ? path : null
+}
 const productCategories = ['Makanan Berat & Bento', 'Kue dan Roti', 'Minuman', 'Lainnya']
 const statusName = (status: string) => ({
   paid: 'Dibayar', completed: 'Dibayar', unpaid: 'Belum bayar', ordered: 'Belum bayar',
@@ -70,6 +77,7 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
   const [products, setProducts] = useState<Product[]>([])
   const [batches, setBatches] = useState<Batch[]>([])
   const [batchProducts, setBatchProducts] = useState<BatchProduct[]>([])
+  const [batchDeleteErrors, setBatchDeleteErrors] = useState<Record<string, string>>({})
   const [orders, setOrders] = useState<Order[]>([])
   const [payments, setPayments] = useState<Payment[]>([])
   const [operatingExpenses, setOperatingExpenses] = useState<OperatingExpense[]>([])
@@ -512,6 +520,74 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
     else await loadData()
   }
 
+  async function deleteProduct(product: Product) {
+    if (!supabase) {
+      setError('Koneksi Supabase belum tersedia.')
+      return
+    }
+    if (orders.some(order => order.order_items.some(item => item.product_id === product.id))) {
+      setError('Produk tidak bisa dihapus karena sudah tercatat dalam pesanan. Nonaktifkan produk agar riwayat pesanan tetap utuh.')
+      return
+    }
+    if (!window.confirm(`Hapus produk "${product.name}"? Produk ini juga akan dihapus dari batch pre-order.`)) return
+
+    setSaving(true)
+    setError('')
+    const { data: deletedProduct, error: deleteError } = await supabase
+      .from('products')
+      .delete()
+      .eq('id', product.id)
+      .eq('store_id', userId)
+      .select('id')
+      .maybeSingle()
+    if (deleteError) setError(`Produk gagal dihapus: ${deleteError.message}`)
+    else if (!deletedProduct) setError('Produk tidak ditemukan atau tidak dapat dihapus.')
+    else {
+      let cleanupMessage = ''
+      const imagePath = getOwnedProductImagePath(product.image_url, userId)
+      if (imagePath) {
+        const { error: imageError } = await supabase.storage.from('product-images').remove([imagePath])
+        if (imageError) cleanupMessage = `Produk berhasil dihapus, tetapi foto produk gagal dihapus: ${imageError.message}`
+      }
+      if (viewProduct?.id === product.id) setViewProduct(null)
+      await loadData()
+      notify(cleanupMessage || 'Produk berhasil dihapus.')
+    }
+    setSaving(false)
+  }
+
+  async function deleteBatch(batch: Batch) {
+    setError('')
+    setBatchDeleteErrors({})
+    if (!supabase) {
+      setBatchDeleteErrors({ [batch.id]: 'Koneksi Supabase belum tersedia.' })
+      return
+    }
+    if (orders.some(order => order.batch_id === batch.id)) {
+      setBatchDeleteErrors({ [batch.id]: 'Batch tidak bisa dihapus karena sudah memiliki pesanan. Riwayat pesanan harus tetap utuh.' })
+      return
+    }
+    if (!window.confirm(`Hapus batch "${batch.name}"? Semua produk dalam batch ini tidak lagi tersedia untuk pre-order.`)) return
+
+    setSaving(true)
+    setError('')
+    const { data: deletedBatch, error: deleteError } = await supabase
+      .from('preorder_batches')
+      .delete()
+      .eq('id', batch.id)
+      .eq('store_id', userId)
+      .select('id')
+      .maybeSingle()
+    if (deleteError) setBatchDeleteErrors({ [batch.id]: `Batch gagal dihapus: ${deleteError.message}` })
+    else if (!deletedBatch) setBatchDeleteErrors({ [batch.id]: 'Batch tidak ditemukan atau tidak dapat dihapus.' })
+    else {
+      setBatchDeleteErrors({})
+      await loadData()
+      notify('Batch berhasil dihapus.')
+    }
+    setSaving(false)
+  }
+
   function closeProductForm() {
     setShowProductForm(false)
     setEditingProduct(null)
@@ -574,7 +650,7 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
         <NavItem icon={<Wallet/>} label="Keuangan" active={active} onClick={setActive}/>
       </nav>
       <div className="menu-label second-label">LAINNYA</div>
-      <nav className="main-nav"><NavItem icon={<BookOpen/>} label="Belajar jualan" active={active} onClick={setActive}/><NavItem icon={<CircleHelp/>} label="Pusat bantuan" active={active} onClick={setActive}/></nav>
+      <nav className="main-nav"><NavItem icon={<BookOpen/>} label="Belajar jualan" active={active} onClick={setActive}/></nav>
       <div className="sidebar-bottom">
         <div className="seller-tip"><div className="tip-icon"><Sparkles size={16}/></div><b>Jualan makin rapi</b><p>Kelola produk, batch, dan pesanan dari satu tempat.</p><button onClick={() => setActive('Produk')}>Kelola produk <ArrowRight size={14}/></button><span className="tip-orb"/></div>
         <button className="nav-item setting-item" disabled title="Pengaturan belum tersedia"><Settings size={18}/><span>Pengaturan</span></button>
@@ -583,7 +659,7 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
     </aside>
 
     <main className="main-area">
-      <header className="topbar"><div className="breadcrumbs"><span>Workspace</span><b>/</b><strong>{active}</strong></div><div className="top-actions"><button className="icon-button help-button" aria-label="Pusat bantuan" onClick={() => setActive('Pusat bantuan')}><CircleHelp size={18}/></button><span className="top-divider"/><div className="seller-account-menu"><button className="seller-chip" onClick={() => setProfilePopoverAnchor(value => value === 'topbar' ? null : 'topbar')}><span className="online-dot"/>Mode penjual<ChevronDown size={14}/></button>{profilePopoverAnchor === 'topbar' && accountPopover}</div></div></header>
+      <header className="topbar"><div className="breadcrumbs"><span>Workspace</span><b>/</b><strong>{active}</strong></div><div className="top-actions"><div className="seller-account-menu"><button className="seller-chip" onClick={() => setProfilePopoverAnchor(value => value === 'topbar' ? null : 'topbar')}><span className="online-dot"/>Mode penjual<ChevronDown size={14}/></button>{profilePopoverAnchor === 'topbar' && accountPopover}</div></div></header>
       {error && !showProductForm && !showBatchForm && active !== 'Profil toko' && <p className="workspace-message error" role="alert">{error}</p>}
       {notice && <p className="workspace-message success" role="status">{notice}</p>}
       {active === 'Profil toko' ? <section className="workspace-page seller-profile-page">
@@ -634,13 +710,12 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
         <PageHeading eyebrow="KATALOG TOKO" title="Produk" description="Kelola produk yang tersedia di tokomu." action={<button className="primary-button" onClick={() => openProductForm()}><Plus size={17}/> Tambah produk</button>}/>
         {error && <p className="workspace-message error" role="alert">{error}</p>}
         <label className="workspace-search"><Search size={16}/><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Cari produk"/></label>
-        {loading ? <EmptyState text="Memuat produk…"/> : visibleProducts.length ? <div className="workspace-product-list">{visibleProducts.map(product => <ProductRow key={product.id} product={product} sold={soldByProduct.get(product.id) ?? 0} onToggle={() => void toggleProduct(product)} onView={() => setViewProduct(product)} onEdit={() => openProductForm(product)}/>)}</div> : <EmptyState text={search ? 'Produk tidak ditemukan.' : 'Belum ada produk. Tambahkan produk pertamamu untuk mulai berjualan.'}/>}
+        {loading ? <EmptyState text="Memuat produk…"/> : visibleProducts.length ? <div className="workspace-product-list">{visibleProducts.map(product => <ProductRow key={product.id} product={product} sold={soldByProduct.get(product.id) ?? 0} onToggle={() => void toggleProduct(product)} onView={() => setViewProduct(product)} onEdit={() => openProductForm(product)} onDelete={() => void deleteProduct(product)} saving={saving}/>)}</div> : <EmptyState text={search ? 'Produk tidak ditemukan.' : 'Belum ada produk. Tambahkan produk pertamamu untuk mulai berjualan.'}/>}
       </section> : active === 'Batch pre-order' ? <section className="workspace-page">
         <PageHeading eyebrow="JADWAL PENJUALAN" title="Batch pre-order" description="Buka batch dan pilih produk yang ingin dijual." action={<button className="primary-button" onClick={() => openBatchForm()} disabled={!products.some(product => product.is_active)}><Plus size={17}/> Buat batch</button>}/>
-        {error && <p className="workspace-message error" role="alert">{error}</p>}
         {loading ? <EmptyState text="Memuat batch…"/> : batches.length ? <div className="workspace-batch-list">{batches.map(batch => {
           const displayStatus = batchDisplayStatus(batch, currentTime)
-          return <article className="workspace-batch-card" key={batch.id}><div><span className={`workspace-batch-status ${displayStatus}`}>{displayStatus === 'open' ? 'Dibuka' : displayStatus === 'closed' ? 'Ditutup' : displayStatus === 'draft' ? 'Draft' : displayStatus}</span><h2>{batch.name}</h2><p>{batchProducts.filter(item => item.batch_id === batch.id).length} produk · {batch.closes_at ? `Tutup ${new Date(batch.closes_at).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}` : 'Tanpa batas waktu'}</p></div><span>{orders.filter(order => order.batch_id === batch.id).length} pesanan</span><div className="workspace-row-actions"><button className="secondary-button" onClick={() => void viewBatchProducts(batch)}><Eye size={15}/> Lihat</button>{['open', 'draft'].includes(displayStatus) && <button className="secondary-button" onClick={() => openBatchForm(batch)}><Pencil size={15}/> Edit</button>}</div></article>
+          return <article className="workspace-batch-card" key={batch.id}><div><span className={`workspace-batch-status ${displayStatus}`}>{displayStatus === 'open' ? 'Dibuka' : displayStatus === 'closed' ? 'Ditutup' : displayStatus === 'draft' ? 'Draft' : displayStatus}</span><h2>{batch.name}</h2><p>{batchProducts.filter(item => item.batch_id === batch.id).length} produk · {batch.closes_at ? `Tutup ${new Date(batch.closes_at).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}` : 'Tanpa batas waktu'}</p>{batchDeleteErrors[batch.id] && <p className="workspace-batch-delete-error" role="alert">{batchDeleteErrors[batch.id]}</p>}</div><span>{orders.filter(order => order.batch_id === batch.id).length} pesanan</span><div className="workspace-row-actions"><button type="button" className="secondary-button" onClick={() => void viewBatchProducts(batch)}><Eye size={15}/> Lihat</button>{['open', 'draft'].includes(displayStatus) && <button type="button" className="secondary-button" onClick={() => openBatchForm(batch)}><Pencil size={15}/> Edit</button>}<button type="button" className="secondary-button danger-button" onClick={() => void deleteBatch(batch)} disabled={saving} aria-label={`Hapus batch ${batch.name}`}><Trash2 size={15}/> Hapus</button></div></article>
         })}</div> : <EmptyState text="Belum ada batch. Buat batch untuk menampilkan produk di halaman belanja."/>}
       </section> : active === 'Keuangan' ? <section className="workspace-page">
         <PageHeading eyebrow="RINGKASAN TRANSAKSI" title="Keuangan" description="Pantau pembayaran pesanan di tokomu."/>
@@ -649,7 +724,7 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
           const status = transactionStatus(payment.order?.status, payment.status)
           return <tr key={payment.id}><td>{payment.order?.order_number ?? 'Pesanan'}{payment.installment_number && <small className="payment-installment-label">{payment.installment_number === 1 ? 'Uang muka' : `Cicilan ${payment.installment_number} dari 3`}</small>}</td><td>{new Date(payment.created_at).toLocaleDateString('id-ID')}</td><td>{methodName(payment.method)}</td><td>{money(payment.amount)}</td><td><span className={`seller-order-status ${status}`}>{statusName(status)}</span></td></tr>
         })}</tbody></table></div> : <EmptyState text="Belum ada transaksi. Pembayaran akan muncul setelah pembeli memesan."/>}
-      </section> : active === 'Pusat bantuan' ? <section className="workspace-page"><PageHeading eyebrow="PESANAJA" title={active} description="Konten pusat bantuan belum tersedia."/><EmptyState text="Panduan dan kontak bantuan akan ditambahkan di sini."/></section> : <section className="workspace-page">
+      </section> : <section className="workspace-page">
         <div className="workspace-welcome"><div><div className="eyebrow"><span className="eyebrow-dot"/> {new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</div><h1>Selamat pagi, {storeName}</h1><p>Ringkasan berdasarkan data toko yang sudah kamu masukkan.</p></div><button className="primary-button" onClick={() => openBatchForm()} disabled={!products.some(product => product.is_active)}><Plus size={17}/> Buat batch baru</button></div>
         {verificationStatus && verificationStatus !== 'verified' && <div className="workspace-callout"><ShieldCheck size={22}/><div><b>Email penjual belum terkonfirmasi</b><span>Konfirmasi email @student.ub.ac.id yang dipakai untuk mendaftar. Setelah email terkonfirmasi dan NIM tersimpan, toko otomatis aktif. Produk juga harus aktif dan dimasukkan ke batch pre-order yang sedang dibuka agar terlihat oleh pembeli.</span></div></div>}
         {loading ? <EmptyState text="Memuat ringkasan toko…"/> : <>
@@ -764,6 +839,6 @@ function ProductThumb({ product }: { product: Product }) {
   return <span className="workspace-product-thumb">{product.image_url ? <img src={product.image_url} alt=""/> : <Package size={19}/>}</span>
 }
 
-function ProductRow({ product, sold, onToggle, onView, onEdit }: { product: Product; sold: number; onToggle: () => void; onView: () => void; onEdit: () => void }) {
-  return <article className="workspace-product-row"><ProductThumb product={product}/><div className="workspace-product-description"><b>{product.name}</b><span>{product.category || 'Tanpa kategori'} · {sold} terjual</span>{product.variants?.length > 0 && <span>Varian: {product.variants.join(', ')}</span>}</div><strong>{money(product.price)}</strong><span>{product.stock === null ? 'Stok tanpa batas' : `${product.stock} stok`}</span><button className={`product-toggle ${product.is_active ? 'enabled' : ''}`} onClick={onToggle}>{product.is_active ? 'Aktif' : 'Nonaktif'}</button><div className="workspace-row-actions"><button className="secondary-button" onClick={onView} aria-label={`Lihat ${product.name}`}><Eye size={15}/> Lihat</button><button className="secondary-button" onClick={onEdit} aria-label={`Edit ${product.name}`}><Pencil size={15}/> Edit</button></div></article>
+function ProductRow({ product, sold, onToggle, onView, onEdit, onDelete, saving }: { product: Product; sold: number; onToggle: () => void; onView: () => void; onEdit: () => void; onDelete: () => void; saving: boolean }) {
+  return <article className="workspace-product-row"><ProductThumb product={product}/><div className="workspace-product-description"><b>{product.name}</b><span>{product.category || 'Tanpa kategori'} · {sold} terjual</span>{product.variants?.length > 0 && <span>Varian: {product.variants.join(', ')}</span>}</div><strong>{money(product.price)}</strong><span>{product.stock === null ? 'Stok tanpa batas' : `${product.stock} stok`}</span><button className={`product-toggle ${product.is_active ? 'enabled' : ''}`} onClick={onToggle}>{product.is_active ? 'Aktif' : 'Nonaktif'}</button><div className="workspace-row-actions"><button type="button" className="secondary-button" onClick={onView} aria-label={`Lihat ${product.name}`}><Eye size={15}/> Lihat</button><button type="button" className="secondary-button" onClick={onEdit} aria-label={`Edit ${product.name}`}><Pencil size={15}/> Edit</button><button type="button" className="secondary-button danger-button" onClick={onDelete} disabled={saving} aria-label={`Hapus ${product.name}`}><Trash2 size={15}/> Hapus</button></div></article>
 }
