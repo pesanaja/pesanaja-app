@@ -356,6 +356,9 @@ body:has(.buyer-home),#root:has(.buyer-home),.buyer-home{background:transparent}
 .profit-loss-note{display:block;margin-top:5px;color:#898999;font-size:11px}
 .profit-loss-panel .profit-loss-positive{color:#26774e}
 .profit-loss-panel .profit-loss-negative{color:#b43e3e}
+.profit-loss-controls{display:flex;align-items:flex-end;gap:14px}
+.profit-loss-controls label{display:grid;gap:5px;color:#555568;font-size:11px;font-weight:600}
+.profit-loss-controls select{max-width:210px;height:36px;padding:0 9px;border:1px solid #dfe1e8;border-radius:7px;background:#fff;color:#34344a;font:400 12px 'DM Sans',sans-serif}
 .profit-loss-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}
 .profit-loss-metrics>div{min-width:0;padding:13px;border:1px solid #e8e8ef;border-radius:9px;background:#fafafd}
 .profit-loss-metrics span,.profit-loss-metrics strong{display:block}
@@ -363,9 +366,9 @@ body:has(.buyer-home),#root:has(.buyer-home),.buyer-home{background:transparent}
 .profit-loss-metrics strong{margin-top:7px;color:#34344a;font-size:15px;overflow-wrap:anywhere}
 .profit-loss-metrics .profit-loss-positive strong{color:#26774e}
 .profit-loss-metrics .profit-loss-negative strong{color:#b43e3e}
-.expense-entry-form{display:grid;grid-template-columns:minmax(160px,1.4fr) minmax(120px,.8fr) minmax(135px,.8fr) auto;align-items:end;gap:10px;padding-top:16px;border-top:1px solid #eeeef2}
+.expense-entry-form{display:grid;grid-template-columns:minmax(160px,1.3fr) minmax(150px,1fr) minmax(120px,.8fr) minmax(135px,.8fr) auto;align-items:end;gap:10px;padding-top:16px;border-top:1px solid #eeeef2}
 .expense-entry-form label{display:flex;min-width:0;flex-direction:column;gap:6px;color:#555568;font-size:12px;font-weight:600}
-.expense-entry-form input{width:100%;height:39px;padding:0 10px;border:1px solid #dfe1e8;border-radius:7px;background:#fff;color:#34344a;font:400 13px 'DM Sans',sans-serif}
+.expense-entry-form input,.expense-entry-form select{width:100%;height:39px;padding:0 10px;border:1px solid #dfe1e8;border-radius:7px;background:#fff;color:#34344a;font:400 13px 'DM Sans',sans-serif}
 .expense-entry-form .primary-button{min-height:39px;white-space:nowrap}
 .expense-entry-form .primary-button:disabled{opacity:.6;cursor:wait}
 .expense-recent-list{display:grid;gap:8px;margin-top:16px}
@@ -434,6 +437,8 @@ body:has(.buyer-home),#root:has(.buyer-home),.buyer-home{background:transparent}
 }
 @media(max-width:700px){
   .profit-loss-panel{padding:14px}
+  .profit-loss-panel .panel-heading{align-items:flex-start;flex-direction:column}
+  .profit-loss-controls{width:100%;justify-content:space-between}
   .profit-loss-metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
   .profit-loss-metrics>div{padding:10px}
   .profit-loss-metrics strong{font-size:13px}

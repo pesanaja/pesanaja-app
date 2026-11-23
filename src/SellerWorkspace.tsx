@@ -37,7 +37,7 @@ type Order = {
   order_items: OrderItem[]
 }
 type Payment = { id: string; method: string | null; status: string; amount: number; created_at: string; installment_number: number | null; due_at: string | null; order: { order_number: string; status: string } | null }
-type OperatingExpense = { id: string; description: string; amount: number; occurred_on: string }
+type OperatingExpense = { id: string; description: string; amount: number; occurred_on: string; batch_id: string | null }
 type ProductForm = { name: string; category: string; description: string; price: string; cost: string; stock: string }
 
 const money = (value: number) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(value)
@@ -110,7 +110,8 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
   const [batchClosesAt, setBatchClosesAt] = useState('')
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([])
   const [productImagePreview, setProductImagePreview] = useState('')
-  const [expenseForm, setExpenseForm] = useState({ description: '', amount: '', occurredOn: localDateInput() })
+  const [profitBatchId, setProfitBatchId] = useState('all')
+  const [expenseForm, setExpenseForm] = useState({ description: '', amount: '', occurredOn: localDateInput(), batchId: '' })
   const [expenseSaving, setExpenseSaving] = useState(false)
 
   useEffect(() => {
@@ -162,7 +163,7 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
       supabase.from('batch_products').select('batch_id,product_id,price,stock_limit,batch:preorder_batches!inner(store_id)').eq('batch.store_id', userId),
       supabase.from('orders').select('id,batch_id,order_number,status,subtotal,total,created_at,buyer:profiles!orders_buyer_id_fkey(full_name),order_items(product_id,product_name,variant,quantity,line_total,unit_cost)').eq('store_id', userId).order('created_at', { ascending: false }),
       supabase.from('payments').select('id,method,status,amount,created_at,installment_number,due_at,order:orders!inner(order_number,status,store_id)').eq('order.store_id', userId).order('created_at', { ascending: false }),
-      supabase.from('operating_expenses').select('id,description,amount,occurred_on').eq('store_id', userId).order('occurred_on', { ascending: false }),
+      supabase.from('operating_expenses').select('id,description,amount,occurred_on,batch_id').eq('store_id', userId).order('occurred_on', { ascending: false }),
       supabase.from('seller_profiles').select('store_name,description,pickup_location,payment_details,qris_image_path,logo_url,verification_status').eq('user_id', userId).maybeSingle(),
       supabase.from('profiles').select('full_name,phone').eq('id', userId).maybeSingle(),
       supabase.from('seller_identities').select('nim').eq('user_id', userId).maybeSingle(),
@@ -344,9 +345,12 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
   const paidOrders = orders.filter(order => order.status === 'paid' || order.status === 'completed')
   const revenue = paidOrders.reduce((sum, order) => sum + order.total, 0)
   const receivedPaymentTotal = payments.filter(payment => payment.status === 'paid').reduce((sum, payment) => sum + payment.amount, 0)
-  const productCosts = paidOrders.reduce((sum, order) => sum + order.order_items.reduce((itemSum, item) => itemSum + item.unit_cost * item.quantity, 0), 0)
-  const expenseTotal = operatingExpenses.reduce((sum, expense) => sum + expense.amount, 0)
-  const netProfit = revenue - productCosts - expenseTotal
+  const profitOrders = profitBatchId === 'all' ? paidOrders : paidOrders.filter(order => order.batch_id === profitBatchId)
+  const profitExpenses = profitBatchId === 'all' ? operatingExpenses : operatingExpenses.filter(expense => expense.batch_id === profitBatchId)
+  const reportRevenue = profitOrders.reduce((sum, order) => sum + order.total, 0)
+  const productCosts = profitOrders.reduce((sum, order) => sum + order.order_items.reduce((itemSum, item) => itemSum + item.unit_cost * item.quantity, 0), 0)
+  const expenseTotal = profitExpenses.reduce((sum, expense) => sum + expense.amount, 0)
+  const netProfit = reportRevenue - productCosts - expenseTotal
   const orderStatusCounts = {
     unpaid: orders.filter(order => ['ordered', 'unpaid'].includes(order.status)).length,
     cancelled: orders.filter(order => order.status === 'cancelled').length,
@@ -393,10 +397,11 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
       description: expenseForm.description.trim(),
       amount,
       occurred_on: expenseForm.occurredOn,
+      batch_id: expenseForm.batchId || null,
     })
     if (expenseError) setError(`Biaya operasional gagal disimpan: ${expenseError.message}`)
     else {
-      setExpenseForm({ description: '', amount: '', occurredOn: localDateInput() })
+      setExpenseForm({ description: '', amount: '', occurredOn: localDateInput(), batchId: '' })
       notify('Biaya operasional berhasil dicatat.')
       await loadData()
     }
@@ -578,10 +583,16 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
       .eq('store_id', userId)
       .select('id')
       .maybeSingle()
-    if (deleteError) setBatchDeleteErrors({ [batch.id]: `Batch gagal dihapus: ${deleteError.message}` })
+    if (deleteError) {
+      const message = deleteError.code === '23503'
+        ? 'Batch tidak dapat dihapus karena masih digunakan oleh pesanan atau catatan biaya.'
+        : `Batch gagal dihapus: ${deleteError.message}`
+      setBatchDeleteErrors({ [batch.id]: message })
+    }
     else if (!deletedBatch) setBatchDeleteErrors({ [batch.id]: 'Batch tidak ditemukan atau tidak dapat dihapus.' })
     else {
       setBatchDeleteErrors({})
+      if (profitBatchId === batch.id) setProfitBatchId('all')
       await loadData()
       notify('Batch berhasil dihapus.')
     }
@@ -737,20 +748,37 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
             <DataStat icon={<Package size={19}/>} title="Produk terjual" value={String(soldCount)} foot={`${products.filter(product => product.is_active).length} produk aktif`}/>
           </section>
           <section className="panel profit-loss-panel">
-            <div className="panel-heading"><div><h3>Laporan Laba Rugi</h3><p>Akumulasi dari pesanan yang sudah dibayar penuh</p><small className="profit-loss-note">Modal pesanan lama memakai nilai modal produk saat migrasi.</small></div><strong className={netProfit < 0 ? 'profit-loss-negative' : 'profit-loss-positive'}>{money(netProfit)}</strong></div>
+            <div className="panel-heading">
+              <div>
+                <h3>Laporan Laba Rugi</h3>
+                <p>{profitBatchId === 'all' ? 'Akumulasi dari pesanan yang sudah dibayar penuh' : `Pesanan dibayar penuh pada ${batches.find(batch => batch.id === profitBatchId)?.name ?? 'batch terpilih'}`}</p>
+                <small className="profit-loss-note">{profitBatchId === 'all' ? 'Biaya umum dan biaya per batch ditampilkan.' : 'Hanya biaya yang ditautkan ke batch ini dihitung; biaya umum hanya masuk laporan keseluruhan.'}</small>
+                <small className="profit-loss-note">Modal pesanan lama memakai nilai modal produk saat migrasi.</small>
+              </div>
+              <div className="profit-loss-controls">
+                <label>Batch laporan
+                  <select value={profitBatchId} onChange={event => setProfitBatchId(event.target.value)}>
+                    <option value="all">Semua batch</option>
+                    {batches.map(batch => <option key={batch.id} value={batch.id}>{batch.name}</option>)}
+                  </select>
+                </label>
+                <strong className={netProfit < 0 ? 'profit-loss-negative' : 'profit-loss-positive'}>{money(netProfit)}</strong>
+              </div>
+            </div>
             <div className="profit-loss-metrics">
-              <div><span>Omzet</span><strong>{money(revenue)}</strong></div>
+              <div><span>Omzet</span><strong>{money(reportRevenue)}</strong></div>
               <div><span>Modal produk terjual</span><strong>{money(productCosts)}</strong></div>
               <div><span>Biaya operasional</span><strong>{money(expenseTotal)}</strong></div>
               <div className={netProfit < 0 ? 'profit-loss-negative' : 'profit-loss-positive'}><span>Laba / rugi bersih</span><strong>{money(netProfit)}</strong></div>
             </div>
             <form className="expense-entry-form" onSubmit={saveOperatingExpense}>
               <label>Keterangan<input required maxLength={160} value={expenseForm.description} onChange={event => setExpenseForm(current => ({ ...current, description: event.target.value }))} placeholder="Contoh: kemasan produk"/></label>
+              <label>Batch (opsional)<select value={expenseForm.batchId} onChange={event => setExpenseForm(current => ({ ...current, batchId: event.target.value }))}><option value="">Biaya umum (hanya total toko)</option>{batches.map(batch => <option key={batch.id} value={batch.id}>{batch.name}</option>)}</select></label>
               <label>Jumlah (Rp)<input required type="number" min="1" step="1" value={expenseForm.amount} onChange={event => setExpenseForm(current => ({ ...current, amount: event.target.value }))} placeholder="0"/></label>
               <label>Tanggal<input required type="date" value={expenseForm.occurredOn} onChange={event => setExpenseForm(current => ({ ...current, occurredOn: event.target.value }))}/></label>
               <button className="primary-button" type="submit" disabled={expenseSaving}>{expenseSaving ? 'Menyimpan…' : 'Catat biaya'}</button>
             </form>
-            {operatingExpenses.length > 0 && <div className="expense-recent-list"><b>Biaya operasional terbaru</b>{operatingExpenses.slice(0, 5).map(expense => <div key={expense.id}><span>{expense.description}<small>{new Date(`${expense.occurred_on}T00:00:00`).toLocaleDateString('id-ID', { dateStyle: 'medium' })}</small></span><strong>{money(expense.amount)}</strong></div>)}</div>}
+            {profitExpenses.length > 0 && <div className="expense-recent-list"><b>Biaya operasional terbaru</b>{profitExpenses.slice(0, 5).map(expense => <div key={expense.id}><span>{expense.description}<small>{new Date(`${expense.occurred_on}T00:00:00`).toLocaleDateString('id-ID', { dateStyle: 'medium' })} · {expense.batch_id ? batches.find(batch => batch.id === expense.batch_id)?.name ?? 'Batch' : 'Biaya umum'}</small></span><strong>{money(expense.amount)}</strong></div>)}</div>}
           </section>
           <section className="order-status-summary" aria-label="Ringkasan status pesanan">
             <div className="unpaid"><span>Belum bayar</span><b>{orderStatusCounts.unpaid}</b></div>
