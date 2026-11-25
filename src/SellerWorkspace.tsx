@@ -762,7 +762,6 @@ export default function SellerWorkspace({ userId, storeName, onSignOut, onStoreN
                     {batches.map(batch => <option key={batch.id} value={batch.id}>{batch.name}</option>)}
                   </select>
                 </label>
-                <strong className={netProfit < 0 ? 'profit-loss-negative' : 'profit-loss-positive'}>{money(netProfit)}</strong>
               </div>
             </div>
             <div className="profit-loss-metrics">
